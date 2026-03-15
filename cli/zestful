@@ -1,0 +1,97 @@
+#!/bin/bash
+# zestful — CLI for interacting with the Zestful agent notification app
+# Sends notifications to the floating overlay via Unix domain socket.
+
+set -e
+
+SOCKET="/tmp/zestful.sock"
+TOKEN_FILE="$HOME/.config/zestful/local-token"
+
+usage() {
+    echo "Usage: zestful notify --agent <name> --message <msg> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  notify    Send a notification to the Zestful overlay"
+    echo ""
+    echo "Options:"
+    echo "  --agent      Agent name (e.g. claude-code, cursor, aider)"
+    echo "  --message    Message to display"
+    echo "  --severity   info, warning (default), or urgent"
+    echo "  --app        App to focus when alert is clicked (e.g. kitty, Terminal, Cursor)"
+    echo "  --window-id  Window ID for focus (app-specific)"
+    echo "  --tab-id     Tab ID for focus (app-specific)"
+    exit 1
+}
+
+notify() {
+    local agent=""
+    local message=""
+    local severity="warning"
+    local app=""
+    local window_id=""
+    local tab_id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agent) agent="$2"; shift 2 ;;
+            --message) message="$2"; shift 2 ;;
+            --severity) severity="$2"; shift 2 ;;
+            --app) app="$2"; shift 2 ;;
+            --window-id) window_id="$2"; shift 2 ;;
+            --tab-id) tab_id="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    if [[ -z "$agent" || -z "$message" ]]; then
+        echo "Error: --agent and --message are required"
+        usage
+    fi
+
+    # Read token
+    if [[ ! -f "$TOKEN_FILE" ]]; then
+        echo "Error: Zestful app not running or not configured. Token file not found at $TOKEN_FILE"
+        exit 2
+    fi
+    local token
+    token=$(cat "$TOKEN_FILE")
+
+    # Check socket exists
+    if [[ ! -S "$SOCKET" ]]; then
+        echo "Error: Zestful app not running. Socket not found at $SOCKET"
+        exit 3
+    fi
+
+    # Build JSON body
+    local body="{\"agent\":\"$agent\",\"message\":\"$message\",\"severity\":\"$severity\""
+    if [[ -n "$app" ]]; then
+        body="$body,\"app\":\"$app\""
+    fi
+    if [[ -n "$window_id" ]]; then
+        body="$body,\"window_id\":\"$window_id\""
+    fi
+    if [[ -n "$tab_id" ]]; then
+        body="$body,\"tab_id\":\"$tab_id\""
+    fi
+    body="$body}"
+
+    local content_length=${#body}
+
+    # Send HTTP request over Unix socket
+    local request="POST /notify HTTP/1.1\r\nHost: localhost\r\nX-Zestful-Token: $token\r\nContent-Type: application/json\r\nContent-Length: $content_length\r\n\r\n$body"
+
+    echo -ne "$request" | socat - UNIX-CONNECT:"$SOCKET" 2>/dev/null || {
+        # Fallback: try with curl if socat isn't available
+        echo -ne "$request" | nc -U "$SOCKET" 2>/dev/null || {
+            echo "Error: Could not connect to Zestful. Is the app running?"
+            exit 3
+        }
+    }
+}
+
+# Parse command
+case "${1:-}" in
+    notify) shift; notify "$@" ;;
+    --help|-h) usage ;;
+    *) usage ;;
+esac
