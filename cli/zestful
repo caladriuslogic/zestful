@@ -62,16 +62,21 @@ notify() {
         exit 3
     fi
 
+    # Escape JSON special characters
+    escape_json() {
+        printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\n/\\n/g'
+    }
+
     # Build JSON body
-    local body="{\"agent\":\"$agent\",\"message\":\"$message\",\"severity\":\"$severity\""
+    local body="{\"agent\":\"$(escape_json "$agent")\",\"message\":\"$(escape_json "$message")\",\"severity\":\"$(escape_json "$severity")\""
     if [[ -n "$app" ]]; then
-        body="$body,\"app\":\"$app\""
+        body="$body,\"app\":\"$(escape_json "$app")\""
     fi
     if [[ -n "$window_id" ]]; then
-        body="$body,\"window_id\":\"$window_id\""
+        body="$body,\"window_id\":\"$(escape_json "$window_id")\""
     fi
     if [[ -n "$tab_id" ]]; then
-        body="$body,\"tab_id\":\"$tab_id\""
+        body="$body,\"tab_id\":\"$(escape_json "$tab_id")\""
     fi
     body="$body}"
 
