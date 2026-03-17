@@ -12,10 +12,12 @@ usage() {
     echo "Usage:"
     echo "  zestful notify --agent <name> --message <msg> [options]"
     echo "  zestful watch <command> [args...]"
+    echo "  zestful ssh [user@]host [ssh options...]"
     echo ""
     echo "Commands:"
     echo "  notify    Send a notification to the Zestful overlay"
     echo "  watch     Run a command and notify when it finishes"
+    echo "  ssh       SSH with Zestful forwarding (port + token)"
     echo ""
     echo "Notify options:"
     echo "  --agent      Agent name (e.g. claude-code, cursor, aider)"
@@ -32,6 +34,7 @@ usage() {
     echo "Examples:"
     echo "  zestful watch npm run build"
     echo "  zestful watch --agent deploy ./deploy.sh"
+    echo "  zestful ssh dev@myserver.com"
     exit 1
 }
 
@@ -143,10 +146,49 @@ watch() {
     return $exit_code
 }
 
+zssh() {
+    if [[ $# -eq 0 ]]; then
+        echo "Error: zestful ssh requires a host"
+        echo "Usage: zestful ssh [user@]host [ssh options...]"
+        exit 1
+    fi
+
+    # Read local token
+    if [[ ! -f "$TOKEN_FILE" ]]; then
+        echo "Error: Zestful app not running. Token file not found at $TOKEN_FILE"
+        exit 2
+    fi
+    local token
+    token=$(cat "$TOKEN_FILE")
+
+    # Read local port
+    local port=$DEFAULT_PORT
+    if [[ -f "$PORT_FILE" ]]; then
+        port=$(cat "$PORT_FILE")
+    fi
+
+    # Extract the host (first arg that isn't an ssh flag) for scp
+    # We parse simply: the first argument is the destination
+    local dest="$1"
+
+    # Copy token to remote
+    echo "Syncing Zestful token to $dest..."
+    ssh "$dest" "mkdir -p ~/.config/zestful && cat > ~/.config/zestful/local-token" < "$TOKEN_FILE"
+    ssh "$dest" "chmod 600 ~/.config/zestful/local-token"
+
+    # Write port file on remote
+    ssh "$dest" "echo $port > ~/.config/zestful/port && chmod 600 ~/.config/zestful/port"
+
+    echo "Connecting with Zestful forwarding (port $port)..."
+    # SSH with reverse port forward — all args passed through
+    exec ssh -R "${port}:localhost:${port}" "$@"
+}
+
 # Parse command
 case "${1:-}" in
     notify) shift; notify "$@" ;;
     watch) shift; watch "$@" ;;
+    ssh) shift; zssh "$@" ;;
     --help|-h) usage ;;
     *) usage ;;
 esac

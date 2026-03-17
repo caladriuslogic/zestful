@@ -137,6 +137,25 @@ zestful notify --agent "deploy" --message "Deploy needs approval" --severity war
 zestful notify --agent "ci" --message "Build failed!" --severity urgent
 ```
 
+### `zestful ssh`
+
+SSH into a remote box with Zestful forwarding. Agents running on the remote machine will notify your local Mac app.
+
+```bash
+zestful ssh dev@myserver.com
+zestful ssh dev@myserver.com -p 2222 -i ~/.ssh/mykey
+```
+
+This copies your auth token to the remote, sets up a reverse port forward, and opens an SSH session. On the remote, `zestful notify` and `zestful watch` work as if you were local. You can also set this up manually:
+
+```bash
+# 1. Copy token to remote
+scp ~/.config/zestful/local-token dev@myserver.com:~/.config/zestful/local-token
+
+# 2. SSH with reverse port forward
+ssh -R 21547:localhost:21547 dev@myserver.com
+```
+
 ## Click-to-Foreground
 
 Pass `--app` to bring the agent's terminal to the front when you click the alert:
