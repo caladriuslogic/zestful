@@ -6,6 +6,7 @@ set -e
 
 TOKEN_FILE="$HOME/.config/zestful/local-token"
 PORT_FILE="$HOME/.config/zestful/port"
+FOCUS_FILE="$HOME/.config/zestful/focus-context"
 DEFAULT_PORT=21547
 
 usage() {
@@ -77,6 +78,17 @@ notify() {
     local port=$DEFAULT_PORT
     if [[ -f "$PORT_FILE" ]]; then
         port=$(cat "$PORT_FILE")
+    fi
+
+    # Apply saved focus context if --app was not explicitly passed
+    if [[ -z "$app" && -f "$FOCUS_FILE" ]]; then
+        while IFS='=' read -r key value; do
+            case "$key" in
+                app) app="$value" ;;
+                window_id) [[ -z "$window_id" ]] && window_id="$value" ;;
+                tab_id) [[ -z "$tab_id" ]] && tab_id="$value" ;;
+            esac
+        done < "$FOCUS_FILE"
     fi
 
     # Escape JSON special characters
@@ -171,13 +183,29 @@ zssh() {
     # We parse simply: the first argument is the destination
     local dest="$1"
 
-    # Copy token to remote
-    echo "Syncing Zestful token to $dest..."
-    ssh "$dest" "mkdir -p ~/.config/zestful && cat > ~/.config/zestful/local-token" < "$TOKEN_FILE"
-    ssh "$dest" "chmod 600 ~/.config/zestful/local-token"
+    # Build focus context from local environment
+    local focus_context=""
+    if [[ -n "${TERM_PROGRAM:-}" ]]; then
+        focus_context="app=${TERM_PROGRAM}"
+    fi
+    if [[ -n "${KITTY_WINDOW_ID:-}" ]]; then
+        focus_context="${focus_context}\nwindow_id=${KITTY_WINDOW_ID}"
+    fi
 
-    # Write port file on remote
-    ssh "$dest" "echo $port > ~/.config/zestful/port && chmod 600 ~/.config/zestful/port"
+    # Copy token and config to remote in a single SSH session
+    echo "Syncing Zestful config to $dest..."
+    ssh "$dest" "mkdir -p ~/.config/zestful && chmod 700 ~/.config/zestful"
+
+    # Token
+    ssh "$dest" "cat > ~/.config/zestful/local-token && chmod 600 ~/.config/zestful/local-token" < "$TOKEN_FILE"
+
+    # Port
+    echo "$port" | ssh "$dest" "cat > ~/.config/zestful/port && chmod 600 ~/.config/zestful/port"
+
+    # Focus context (so remote zestful notify knows which local terminal tab to focus)
+    if [[ -n "$focus_context" ]]; then
+        echo -e "$focus_context" | ssh "$dest" "cat > ~/.config/zestful/focus-context && chmod 600 ~/.config/zestful/focus-context"
+    fi
 
     echo "Connecting with Zestful forwarding (port $port)..."
     # SSH with reverse port forward — all args passed through

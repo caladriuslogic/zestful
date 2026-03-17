@@ -146,7 +146,9 @@ zestful ssh dev@myserver.com
 zestful ssh dev@myserver.com -p 2222 -i ~/.ssh/mykey
 ```
 
-This copies your auth token to the remote, sets up a reverse port forward, and opens an SSH session. On the remote, `zestful notify` and `zestful watch` work as if you were local. You can also set this up manually:
+This copies your auth token, port, and focus context (terminal app + window/tab ID) to the remote, sets up a reverse port forward, and opens an SSH session. On the remote, `zestful notify` and `zestful watch` work as if you were local — including click-to-focus back to the correct Kitty/iTerm2 tab on your Mac.
+
+**Manual setup** (for existing scripts or `.ssh/config`):
 
 ```bash
 # 1. Copy token to remote
