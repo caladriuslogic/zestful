@@ -36,6 +36,7 @@ Download from the [App Store](https://zestful.dev) (coming soon).
 
 ```bash
 zestful notify --agent <name> --message <msg> [options]
+zestful watch <command> [args...]
 ```
 
 | Flag | Required | Description |
@@ -46,6 +47,19 @@ zestful notify --agent <name> --message <msg> [options]
 | `--app` | No | App to focus when alert is clicked |
 | `--window-id` | No | Window ID for focus |
 | `--tab-id` | No | Tab ID for focus |
+| `--no-push` | No | Suppress push notification for this event |
+
+### `zestful watch`
+
+Wraps any command and notifies when it finishes:
+
+```bash
+zestful watch npm run build        # notifies on completion
+zestful watch cargo test --release  # notifies on success or failure
+zestful watch --agent deploy ./deploy.sh
+```
+
+Exit 0 → `warning` ("done"). Non-zero → `urgent` ("failed"). Auto-detects `$TERM_PROGRAM` for click-to-focus.
 
 ### Severity Levels
 
@@ -59,7 +73,7 @@ zestful notify --agent <name> --message <msg> [options]
 
 ### Claude Code
 
-Add to `.claude/settings.json`:
+Add to `.claude/settings.json` (or copy `hooks/claude-code.json`):
 
 ```json
 {
@@ -68,35 +82,57 @@ Add to `.claude/settings.json`:
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "zestful notify --agent \"claude-code:$(basename $PWD)\" --message 'Waiting for your input' --app \"$TERM_PROGRAM\""
+        "command": "zestful notify --agent \"claude-code:$(basename $PWD)\" --message 'Waiting for your input' --app \"$TERM_PROGRAM\" ${KITTY_WINDOW_ID:+--window-id \"$KITTY_WINDOW_ID\"}"
       }]
     }],
     "Start": [{
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "zestful notify --agent \"claude-code:$(basename $PWD)\" --message 'Working...' --severity info"
+        "command": "zestful notify --agent \"claude-code:$(basename $PWD)\" --message 'Working...' --severity info --no-push"
       }]
     }]
   }
 }
 ```
 
-### Cursor
-
-```bash
-zestful notify --agent "cursor" --message "Cursor needs input" --app "Cursor"
-```
-
 ### Aider
 
+One-liner — no config file needed:
+
 ```bash
-aider "$@"; zestful notify --agent "aider:$(basename $PWD)" --message "Aider finished" --app "$TERM_PROGRAM"
+aider --notifications-command 'zestful notify --agent "aider:$(basename $PWD)" --message "$AIDER_NOTIFICATION_TITLE" --app "$TERM_PROGRAM"'
 ```
+
+### Cursor
+
+Place `.cursor/hooks.json` in your project root (beta):
+
+```json
+{
+  "hooks": [
+    { "event": "stop", "command": "zestful notify --agent \"cursor:$(basename $PWD)\" --message 'Waiting for your input' --app Cursor" },
+    { "event": "start", "command": "zestful notify --agent \"cursor:$(basename $PWD)\" --message 'Working...' --severity info" }
+  ]
+}
+```
+
+### GitHub Copilot CLI
+
+Place in `.github/hooks/` (see `hooks/copilot-cli.json`).
+
+### OpenAI Codex CLI
+
+Place `.codex/hooks.json` in your project root (see `hooks/codex-cli.json`).
+
+### Cline
+
+Symlink `hooks/cline-hook.sh` to `~/Documents/Cline/Rules/Hooks/TaskCancel`. Note: only `TaskCancel` is supported (no `TaskComplete` yet).
 
 ### Any Script
 
 ```bash
+zestful watch npm run build
 zestful notify --agent "deploy" --message "Deploy needs approval" --severity warning
 zestful notify --agent "ci" --message "Build failed!" --severity urgent
 ```
@@ -109,7 +145,7 @@ Pass `--app` to bring the agent's terminal to the front when you click the alert
 zestful notify --agent "test" --message "waiting" --app "$TERM_PROGRAM"
 ```
 
-Works with Kitty, Terminal.app, iTerm2, VS Code, Cursor, and any app via AppleScript. Configure the focus method in Settings.
+Works with Kitty, iTerm2, WezTerm, Terminal.app (tab-level), and VS Code, Cursor, Alacritty, Ghostty, Warp, Hyper (window-level) via AppleScript.
 
 ## How It Works
 

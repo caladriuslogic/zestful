@@ -1,25 +1,37 @@
 #!/bin/bash
 # zestful — CLI for interacting with the Zestful agent notification app
-# Sends notifications to the floating overlay via Unix domain socket.
+# Sends notifications to the Zestful overlay via localhost TCP.
 
 set -e
 
-SOCKET="/tmp/zestful.sock"
 TOKEN_FILE="$HOME/.config/zestful/local-token"
+PORT_FILE="$HOME/.config/zestful/port"
+DEFAULT_PORT=21547
 
 usage() {
-    echo "Usage: zestful notify --agent <name> --message <msg> [options]"
+    echo "Usage:"
+    echo "  zestful notify --agent <name> --message <msg> [options]"
+    echo "  zestful watch <command> [args...]"
     echo ""
     echo "Commands:"
     echo "  notify    Send a notification to the Zestful overlay"
+    echo "  watch     Run a command and notify when it finishes"
     echo ""
-    echo "Options:"
+    echo "Notify options:"
     echo "  --agent      Agent name (e.g. claude-code, cursor, aider)"
     echo "  --message    Message to display"
     echo "  --severity   info, warning (default), or urgent"
     echo "  --app        App to focus when alert is clicked (e.g. kitty, Terminal, Cursor)"
     echo "  --window-id  Window ID for focus (app-specific)"
     echo "  --tab-id     Tab ID for focus (app-specific)"
+    echo "  --no-push    Suppress push notification for this event"
+    echo ""
+    echo "Watch options:"
+    echo "  --agent      Override agent name (default: watch)"
+    echo ""
+    echo "Examples:"
+    echo "  zestful watch npm run build"
+    echo "  zestful watch --agent deploy ./deploy.sh"
     exit 1
 }
 
@@ -30,6 +42,7 @@ notify() {
     local app=""
     local window_id=""
     local tab_id=""
+    local push="true"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -39,6 +52,7 @@ notify() {
             --app) app="$2"; shift 2 ;;
             --window-id) window_id="$2"; shift 2 ;;
             --tab-id) tab_id="$2"; shift 2 ;;
+            --no-push) push="false"; shift ;;
             *) shift ;;
         esac
     done
@@ -56,10 +70,10 @@ notify() {
     local token
     token=$(cat "$TOKEN_FILE")
 
-    # Check socket exists
-    if [[ ! -S "$SOCKET" ]]; then
-        echo "Error: Zestful app not running. Socket not found at $SOCKET"
-        exit 3
+    # Read port
+    local port=$DEFAULT_PORT
+    if [[ -f "$PORT_FILE" ]]; then
+        port=$(cat "$PORT_FILE")
     fi
 
     # Escape JSON special characters
@@ -78,25 +92,61 @@ notify() {
     if [[ -n "$tab_id" ]]; then
         body="$body,\"tab_id\":\"$(escape_json "$tab_id")\""
     fi
+    if [[ "$push" == "false" ]]; then
+        body="$body,\"push\":false"
+    fi
     body="$body}"
 
-    local content_length=${#body}
-
-    # Send HTTP request over Unix socket
-    local request="POST /notify HTTP/1.1\r\nHost: localhost\r\nX-Zestful-Token: $token\r\nContent-Type: application/json\r\nContent-Length: $content_length\r\n\r\n$body"
-
-    echo -ne "$request" | socat - UNIX-CONNECT:"$SOCKET" 2>/dev/null || {
-        # Fallback: try with curl if socat isn't available
-        echo -ne "$request" | nc -U "$SOCKET" 2>/dev/null || {
-            echo "Error: Could not connect to Zestful. Is the app running?"
-            exit 3
-        }
+    # Send via curl to localhost
+    curl -4 -s -X POST "http://localhost:${port}/notify" \
+        -H "X-Zestful-Token: $token" \
+        -H "Content-Type: application/json" \
+        -d "$body" 2>/dev/null || {
+        echo "Error: Could not connect to Zestful. Is the app running?"
+        exit 3
     }
+}
+
+watch() {
+    local agent="watch"
+
+    # Parse optional --agent flag before the command
+    if [[ "${1:-}" == "--agent" ]]; then
+        agent="$2"
+        shift 2
+    fi
+
+    if [[ $# -eq 0 ]]; then
+        echo "Error: zestful watch requires a command"
+        echo "Usage: zestful watch [--agent <name>] <command> [args...]"
+        exit 1
+    fi
+
+    # Auto-detect terminal for click-to-focus
+    local app="${TERM_PROGRAM:-}"
+
+    # Disable set -e so we can capture the exit code
+    set +e
+    "$@"
+    local exit_code=$?
+    set -e
+
+    local cmd_name
+    cmd_name=$(basename "$1")
+
+    if [[ $exit_code -eq 0 ]]; then
+        notify --agent "$agent:$cmd_name" --message "$cmd_name finished" --severity warning ${app:+--app "$app"}
+    else
+        notify --agent "$agent:$cmd_name" --message "$cmd_name failed (exit $exit_code)" --severity urgent ${app:+--app "$app"}
+    fi
+
+    return $exit_code
 }
 
 # Parse command
 case "${1:-}" in
     notify) shift; notify "$@" ;;
+    watch) shift; watch "$@" ;;
     --help|-h) usage ;;
     *) usage ;;
 esac
