@@ -33,12 +33,15 @@ async fn focus_via_api(tab_id: &str) -> Result<()> {
             for session in &tab.sessions {
                 // Query tab.title — the actual tab name visible in iTerm2.
                 // The session.title is often "tmux" or "bash", not the tab name.
-                let tab_title = session
+                // iTerm2 returns variable values as JSON-encoded strings,
+                // so tab.title comes back as "\"Zestful\"" — strip the quotes.
+                let tab_title_raw = session
                     .get_variable("tab.title")
                     .await
                     .ok()
                     .flatten()
                     .unwrap_or_default();
+                let tab_title = tab_title_raw.trim_matches('"');
 
                 let matches = tab_title.eq_ignore_ascii_case(tab_id)
                     || session
