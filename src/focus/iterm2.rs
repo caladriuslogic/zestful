@@ -2,7 +2,8 @@
 //!
 //! Uses the [`iterm2-client`](https://crates.io/crates/iterm2-client) crate for
 //! native WebSocket + Protobuf communication with iTerm2 — no Python dependency.
-//! Falls back to AppleScript activation if the API is unavailable.
+//! Connects via Unix socket. Falls back to AppleScript activation if the API is
+//! unavailable.
 
 use anyhow::Result;
 
@@ -23,19 +24,28 @@ pub async fn focus(tab_id: Option<&str>) -> Result<()> {
 async fn focus_via_api(tab_id: &str) -> Result<()> {
     use iterm2_client::{App, Connection};
 
-    let conn = Connection::connect("zestful-daemon").await?;
+    let conn = Connection::connect_unix("zestful-daemon").await?;
     let app = App::new(conn);
     let sessions = app.list_sessions().await?;
 
     for window in &sessions.windows {
         for tab in &window.tabs {
             for session in &tab.sessions {
-                // Match by title (titleOverride) or session id
-                let matches = session
-                    .title
-                    .as_deref()
-                    .map(|t| t == tab_id)
-                    .unwrap_or(false);
+                // Query tab.title — the actual tab name visible in iTerm2.
+                // The session.title is often "tmux" or "bash", not the tab name.
+                let tab_title = session
+                    .get_variable("tab.title")
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+
+                let matches = tab_title.eq_ignore_ascii_case(tab_id)
+                    || session
+                        .title
+                        .as_deref()
+                        .map(|t| t.eq_ignore_ascii_case(tab_id))
+                        .unwrap_or(false);
 
                 if matches {
                     session.activate().await?;
@@ -54,14 +64,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_focus_no_tab_id() {
-        // With no tab_id, should just activate the app (or no-op)
         let result = focus(None).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_focus_with_tab_id_falls_back() {
-        // iTerm2 API likely not available in test, should fall back gracefully
         let result = focus(Some("test-tab")).await;
         assert!(result.is_ok());
     }
