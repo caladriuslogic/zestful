@@ -30,7 +30,7 @@ enum Commands {
         message: String,
 
         /// Severity: info, warning (default), or urgent
-        #[arg(long, default_value = "warning")]
+        #[arg(long, default_value = "warning", value_parser = ["info", "warning", "urgent"])]
         severity: String,
 
         /// App to focus when alert is clicked

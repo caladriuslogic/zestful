@@ -8,7 +8,7 @@ use crate::config;
 use crate::focus;
 use anyhow::Result;
 use axum::{
-    extract::Json,
+    extract::{DefaultBodyLimit, Json},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -38,9 +38,15 @@ pub fn run() -> Result<()> {
 async fn run_server() -> Result<()> {
     let pid_file = config::pid_file();
 
-    // Ensure config dir exists
+    // Ensure config dir exists with restrictive permissions
     if let Some(parent) = pid_file.parent() {
         fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o700);
+            let _ = fs::set_permissions(parent, perms);
+        }
     }
 
     // Write PID file safely: refuse to write if path is a symlink
@@ -57,7 +63,8 @@ async fn run_server() -> Result<()> {
 
     let app = Router::new()
         .route("/health", get(health))
-        .route("/focus", post(handle_focus));
+        .route("/focus", post(handle_focus))
+        .layer(DefaultBodyLimit::max(16_384)); // 16 KB
 
     let port = config::daemon_port();
     let addr = format!("127.0.0.1:{}", port);

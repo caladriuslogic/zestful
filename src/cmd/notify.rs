@@ -88,8 +88,8 @@ pub fn send(
 
     match result {
         Ok(_) => Ok(()),
-        Err(e) => {
-            bail!("Could not connect to Zestful. Is the app running? ({})", e);
+        Err(_) => {
+            bail!("Could not connect to Zestful. Is the app running?");
         }
     }
 }
@@ -164,6 +164,8 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Could not connect"));
+        // Error must not leak the token
+        assert!(!err_msg.contains("fake-token"));
     }
 
     #[test]
