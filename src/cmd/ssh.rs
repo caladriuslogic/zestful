@@ -21,9 +21,9 @@ pub fn run(args: Vec<String>) -> Result<()> {
 
     let dest = &args[0];
 
-    // Build focus context from local environment
+    // Build focus context from local environment (looks through tmux/screen)
     let mut focus_lines = Vec::new();
-    if let Ok(term) = std::env::var("TERM_PROGRAM") {
+    if let Some(term) = config::detect_terminal() {
         focus_lines.push(format!("app={}", term));
     }
     if let Ok(kitty_wid) = std::env::var("KITTY_WINDOW_ID") {

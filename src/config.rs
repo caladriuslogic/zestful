@@ -119,6 +119,35 @@ pub fn read_focus_context() -> HashMap<String, String> {
     ctx
 }
 
+/// Detect the actual terminal app, looking through multiplexers like tmux.
+///
+/// Checks terminal-specific env vars first (e.g. `ITERM_SESSION_ID` for iTerm2,
+/// `KITTY_WINDOW_ID` for kitty), then falls back to `$TERM_PROGRAM`. Multiplexers
+/// like tmux set `TERM_PROGRAM=tmux`, which can't be focused — we need the real
+/// terminal wrapping it.
+pub fn detect_terminal() -> Option<String> {
+    // iTerm2 sets these even inside tmux
+    if env::var("ITERM_SESSION_ID").is_ok() || env::var("ITERM_PROFILE").is_ok() {
+        return Some("iTerm2".to_string());
+    }
+    // kitty sets KITTY_WINDOW_ID
+    if env::var("KITTY_WINDOW_ID").is_ok() {
+        return Some("kitty".to_string());
+    }
+    // WezTerm sets WEZTERM_EXECUTABLE
+    if env::var("WEZTERM_EXECUTABLE").is_ok() {
+        return Some("WezTerm".to_string());
+    }
+    // Fall back to TERM_PROGRAM, but skip multiplexers
+    if let Ok(term) = env::var("TERM_PROGRAM") {
+        let lower = term.to_lowercase();
+        if lower != "tmux" && lower != "screen" {
+            return Some(term);
+        }
+    }
+    None
+}
+
 /// Ensure the daemon is running. If not, spawn `zestful daemon` detached.
 pub fn ensure_daemon() {
     // Check PID file
@@ -298,5 +327,11 @@ mod tests {
     fn test_pid_file_path() {
         let path = pid_file();
         assert!(path.ends_with("zestfuld.pid"));
+    }
+
+    #[test]
+    fn test_detect_terminal_returns_something() {
+        // Should not panic; result depends on environment
+        let _ = detect_terminal();
     }
 }
