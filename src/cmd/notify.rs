@@ -92,16 +92,22 @@ pub fn send(
         .header("Content-Type", "application/json")
         .send(json.as_bytes());
 
-    if let Err(e) = result {
-        // Don't fail — the CLI runs as a hook and a missing Mac app
-        // shouldn't cause noisy errors on every agent stop/start.
-        let reason = match &e {
-            ureq::Error::Io(_) => "connection refused",
-            ureq::Error::Timeout(_) => "timeout",
-            ureq::Error::HostNotFound => "host not found",
-            _ => "request failed",
-        };
-        eprintln!("zestful: could not reach Zestful app ({})", reason);
+    match result {
+        Ok(_) => {}
+        Err(ureq::Error::StatusCode(code)) => {
+            // App responded but rejected the request — log but don't fail
+            eprintln!("zestful: Zestful app returned HTTP {}", code);
+        }
+        Err(e) => {
+            // Connection-level failure — log but don't fail
+            let reason = match &e {
+                ureq::Error::Io(_) => "connection refused",
+                ureq::Error::Timeout(_) => "timeout",
+                ureq::Error::HostNotFound => "host not found",
+                _ => "request failed",
+            };
+            eprintln!("zestful: could not reach Zestful app ({})", reason);
+        }
     }
     Ok(())
 }

@@ -43,11 +43,13 @@ async fn focus_via_api(tab_id: &str) -> Result<()> {
                     .unwrap_or_default();
                 let tab_title = tab_title_raw.trim_matches('"');
 
-                let matches = tab_title.eq_ignore_ascii_case(tab_id)
+                let tab_id_lower = tab_id.to_lowercase();
+                let matches = tab_title.to_lowercase().starts_with(&tab_id_lower)
+                    || tab_title.eq_ignore_ascii_case(tab_id)
                     || session
                         .title
                         .as_deref()
-                        .map(|t| t.eq_ignore_ascii_case(tab_id))
+                        .map(|t| t.to_lowercase().starts_with(&tab_id_lower) || t.eq_ignore_ascii_case(tab_id))
                         .unwrap_or(false);
 
                 if matches {
