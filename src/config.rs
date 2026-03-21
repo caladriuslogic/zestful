@@ -148,6 +148,26 @@ pub fn detect_terminal() -> Option<String> {
     None
 }
 
+/// Detect the current tab name for focus-back. Inside tmux, uses the
+/// tmux window name which typically matches the iTerm2 tab title.
+pub fn detect_tab_id() -> Option<String> {
+    // Inside tmux: get the window name (matches iTerm2 tab title)
+    if env::var("TMUX").is_ok() {
+        if let Ok(output) = std::process::Command::new("tmux")
+            .args(["display-message", "-p", "#{window_name}"])
+            .output()
+        {
+            if output.status.success() {
+                let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Ensure the daemon is running. If not, spawn `zestful daemon` detached.
 pub fn ensure_daemon() {
     // Check PID file

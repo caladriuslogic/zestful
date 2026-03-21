@@ -41,19 +41,27 @@ pub fn run(
     })?;
     let port = config::read_port();
 
-    // Apply focus context if --app was not explicitly passed:
+    // Apply focus context if --app was not explicitly passed, or if the
+    // explicit value is a multiplexer (tmux/screen) which isn't focusable:
     // 1. Try saved focus-context file
     // 2. Fall back to auto-detecting the terminal (looks through tmux/screen)
-    let (app, window_id, tab_id) = if app.is_none() {
+    let is_multiplexer = app.as_deref().map_or(false, |a| {
+        let lower = a.to_lowercase();
+        lower == "tmux" || lower == "screen"
+    });
+    let (app, window_id, tab_id) = if app.is_none() || is_multiplexer {
         let ctx = config::read_focus_context();
         let app = ctx
             .get("app")
             .cloned()
             .or_else(|| config::detect_terminal());
+        let tab_id = tab_id
+            .or_else(|| ctx.get("tab_id").cloned())
+            .or_else(|| config::detect_tab_id());
         (
             app,
             window_id.or_else(|| ctx.get("window_id").cloned()),
-            tab_id.or_else(|| ctx.get("tab_id").cloned()),
+            tab_id,
         )
     } else {
         (app, window_id, tab_id)
