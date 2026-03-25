@@ -1,8 +1,8 @@
 //! `zestful watch` — run a command and notify when it finishes.
 //!
 //! Spawns the command as a child process, captures the exit code, and sends a
-//! notification with severity based on success/failure. Auto-detects the terminal
-//! for click-to-focus, looking through multiplexers like tmux.
+//! notification with severity based on success/failure. Auto-captures terminal
+//! URI via `terminal-inspector` for click-to-focus.
 
 use crate::{cmd::notify, config};
 use anyhow::{bail, Result};
@@ -19,8 +19,8 @@ pub fn run(agent: String, command: Vec<String>) -> Result<()> {
     })?;
     let port = config::read_port();
 
-    // Auto-detect terminal for click-to-focus (looks through tmux/screen)
-    let app = config::detect_terminal();
+    // Capture terminal URI before running the command (environment is stable now)
+    let terminal_uri = terminal_inspector::locate().ok();
 
     // Run the command
     let status = Command::new(&command[0])
@@ -48,8 +48,7 @@ pub fn run(agent: String, command: Vec<String>) -> Result<()> {
         ("urgent", format!("{} failed (exit {})", cmd_name, exit_code))
     };
 
-    // Send notification directly (not via HTTP to self)
-    let _ = notify::send(&token, port, &agent_name, &message, severity, app, None, None, false);
+    let _ = notify::send(&token, port, &agent_name, &message, severity, terminal_uri, false);
 
     std::process::exit(exit_code);
 }

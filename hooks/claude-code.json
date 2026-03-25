@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "zestful notify --agent \"claude-code:$(basename $PWD)\" --message 'Waiting for your input' --app \"$TERM_PROGRAM\" ${KITTY_WINDOW_ID:+--window-id \"$KITTY_WINDOW_ID\"}"
+            "command": "zestful notify --agent \"claude-code:$(basename $PWD)\" --message 'Waiting for your input'"
           }
         ]
       }

@@ -21,14 +21,8 @@ pub fn run(args: Vec<String>) -> Result<()> {
 
     let dest = &args[0];
 
-    // Build focus context from local environment (looks through tmux/screen)
-    let mut focus_lines = Vec::new();
-    if let Some(term) = config::detect_terminal() {
-        focus_lines.push(format!("app={}", term));
-    }
-    if let Ok(kitty_wid) = std::env::var("KITTY_WINDOW_ID") {
-        focus_lines.push(format!("window_id={}", kitty_wid));
-    }
+    // Capture terminal URI for click-to-focus on the remote side
+    let terminal_uri = terminal_inspector::locate().ok();
 
     // Sync config to remote
     eprintln!("Syncing Zestful config to {}...", dest);
@@ -50,13 +44,12 @@ pub fn run(args: Vec<String>) -> Result<()> {
         "cat > ~/.config/zestful/port && chmod 600 ~/.config/zestful/port",
     )?;
 
-    // Copy focus context
-    if !focus_lines.is_empty() {
-        let focus_context = focus_lines.join("\n");
+    // Copy terminal URI so remote `zestful notify` can use it
+    if let Some(ref uri) = terminal_uri {
         pipe_to_ssh(
             dest,
-            &focus_context,
-            "cat > ~/.config/zestful/focus-context && chmod 600 ~/.config/zestful/focus-context",
+            uri,
+            "cat > ~/.config/zestful/terminal-uri && chmod 600 ~/.config/zestful/terminal-uri",
         )?;
     }
 

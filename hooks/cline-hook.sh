@@ -4,4 +4,4 @@
 #
 # Cline fires this hook when the user cancels a task or the task
 # errors out. (TaskComplete is not supported yet.)
-zestful notify --agent "cline" --message "Task cancelled — needs attention" --severity warning --app "Cursor"
+zestful notify --agent "cline" --message "Task cancelled — needs attention" --severity warning

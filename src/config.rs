@@ -1,13 +1,11 @@
-//! Configuration helpers for reading tokens, ports, focus context, and managing
-//! the daemon lifecycle.
+//! Configuration helpers for reading tokens, ports, and managing the daemon
+//! lifecycle.
 //!
 //! Config files live in `~/.config/zestful/`:
 //! - `local-token` — auth token shared with the Mac app
 //! - `port` — override for the Mac app's HTTP port (default 21547)
-//! - `focus-context` — saved focus state (`app=`, `window_id=`, `tab_id=`)
 //! - `zestfuld.pid` — PID of the running focus daemon
 
-use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -33,11 +31,6 @@ pub fn token_file() -> PathBuf {
 /// Path to the port override file.
 pub fn port_file() -> PathBuf {
     config_dir().join("port")
-}
-
-/// Path to the focus context file.
-pub fn focus_file() -> PathBuf {
-    config_dir().join("focus-context")
 }
 
 /// Path to the daemon PID file.
@@ -106,66 +99,13 @@ pub fn read_port() -> u16 {
     DEFAULT_PORT
 }
 
-/// Read focus context from the focus-context file (key=value format).
-pub fn read_focus_context() -> HashMap<String, String> {
-    let mut ctx = HashMap::new();
-    if let Ok(contents) = fs::read_to_string(focus_file()) {
-        for line in contents.lines() {
-            if let Some((key, value)) = line.split_once('=') {
-                ctx.insert(key.trim().to_string(), value.trim().to_string());
-            }
-        }
-    }
-    ctx
-}
-
-/// Detect the actual terminal app, looking through multiplexers like tmux.
-///
-/// Checks terminal-specific env vars first (e.g. `ITERM_SESSION_ID` for iTerm2,
-/// `KITTY_WINDOW_ID` for kitty), then falls back to `$TERM_PROGRAM`. Multiplexers
-/// like tmux set `TERM_PROGRAM=tmux`, which can't be focused — we need the real
-/// terminal wrapping it.
-pub fn detect_terminal() -> Option<String> {
-    // iTerm2 sets these even inside tmux
-    if env::var("ITERM_SESSION_ID").is_ok() || env::var("ITERM_PROFILE").is_ok() {
-        return Some("iTerm2".to_string());
-    }
-    // kitty sets KITTY_WINDOW_ID
-    if env::var("KITTY_WINDOW_ID").is_ok() {
-        return Some("kitty".to_string());
-    }
-    // WezTerm sets WEZTERM_EXECUTABLE
-    if env::var("WEZTERM_EXECUTABLE").is_ok() {
-        return Some("WezTerm".to_string());
-    }
-    // Fall back to TERM_PROGRAM, but skip multiplexers
-    if let Ok(term) = env::var("TERM_PROGRAM") {
-        let lower = term.to_lowercase();
-        if lower != "tmux" && lower != "screen" {
-            return Some(term);
-        }
-    }
-    None
-}
-
-/// Detect the current tab name for focus-back. Inside tmux, uses the
-/// tmux window name which typically matches the iTerm2 tab title.
-pub fn detect_tab_id() -> Option<String> {
-    // Inside tmux: get the window name (matches iTerm2 tab title)
-    if env::var("TMUX").is_ok() {
-        if let Ok(output) = std::process::Command::new("tmux")
-            .args(["display-message", "-p", "#{window_name}"])
-            .output()
-        {
-            if output.status.success() {
-                let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !name.is_empty() {
-                    return Some(name);
-                }
-            }
-        }
-    }
-    None
+/// Read the saved terminal URI (written by `zestful ssh` for remote sessions).
+pub fn read_terminal_uri() -> Option<String> {
+    let path = config_dir().join("terminal-uri");
+    fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Ensure the daemon is running. If not, spawn `zestful daemon` detached.
@@ -214,55 +154,6 @@ fn libc_kill(pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::TempDir;
-
-    // Helper to set up a temp config dir
-    fn with_temp_config<F: FnOnce(&std::path::Path)>(f: F) {
-        let dir = TempDir::new().unwrap();
-        f(dir.path());
-    }
-
-    #[test]
-    fn test_read_focus_context_parses_key_value() {
-        with_temp_config(|dir| {
-            let file = dir.join("focus-context");
-            let mut f = fs::File::create(&file).unwrap();
-            writeln!(f, "app=kitty").unwrap();
-            writeln!(f, "window_id=42").unwrap();
-            writeln!(f, "tab_id=my-tab").unwrap();
-
-            let contents = fs::read_to_string(&file).unwrap();
-            let mut ctx = HashMap::new();
-            for line in contents.lines() {
-                if let Some((key, value)) = line.split_once('=') {
-                    ctx.insert(key.trim().to_string(), value.trim().to_string());
-                }
-            }
-
-            assert_eq!(ctx.get("app").unwrap(), "kitty");
-            assert_eq!(ctx.get("window_id").unwrap(), "42");
-            assert_eq!(ctx.get("tab_id").unwrap(), "my-tab");
-        });
-    }
-
-    #[test]
-    fn test_read_focus_context_empty_file() {
-        with_temp_config(|dir| {
-            let file = dir.join("focus-context");
-            fs::File::create(&file).unwrap();
-
-            let contents = fs::read_to_string(&file).unwrap();
-            let mut ctx = HashMap::new();
-            for line in contents.lines() {
-                if let Some((key, value)) = line.split_once('=') {
-                    ctx.insert(key.trim().to_string(), value.trim().to_string());
-                }
-            }
-
-            assert!(ctx.is_empty());
-        });
-    }
 
     #[test]
     fn test_config_dir_uses_home() {
@@ -293,20 +184,17 @@ mod tests {
 
     #[test]
     fn test_libc_kill_nonexistent_pid() {
-        // PID 999999 almost certainly doesn't exist
         assert!(!libc_kill(999999));
     }
 
     #[test]
     fn test_libc_kill_current_process() {
-        // Current process should be alive
         let pid = std::process::id() as i32;
         assert!(libc_kill(pid));
     }
 
     #[test]
     fn test_read_token_returns_some_or_none() {
-        // Should not panic regardless of whether token file exists
         let _ = read_token();
     }
 
@@ -314,14 +202,6 @@ mod tests {
     fn test_read_port_returns_valid_port() {
         let port = read_port();
         assert!(port > 0);
-    }
-
-    #[test]
-    fn test_read_focus_context_returns_map() {
-        // Should not panic regardless of whether file exists
-        let ctx = read_focus_context();
-        // We can't assert specific values, but it should be a valid HashMap
-        let _ = ctx.len();
     }
 
     #[test]
@@ -338,20 +218,8 @@ mod tests {
     }
 
     #[test]
-    fn test_focus_file_path() {
-        let path = focus_file();
-        assert!(path.ends_with("focus-context"));
-    }
-
-    #[test]
     fn test_pid_file_path() {
         let path = pid_file();
         assert!(path.ends_with("zestfuld.pid"));
-    }
-
-    #[test]
-    fn test_detect_terminal_returns_something() {
-        // Should not panic; result depends on environment
-        let _ = detect_terminal();
     }
 }

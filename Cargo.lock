@@ -283,7 +283,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -876,7 +876,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1086,7 +1086,19 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "terminal-inspector"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f9d5a2ce961728018990525614109406f0952ba39c94134096823f014ff92f2"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1579,6 +1591,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "terminal-inspector",
  "tokio",
  "tower",
  "ureq",

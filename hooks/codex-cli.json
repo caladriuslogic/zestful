@@ -2,7 +2,7 @@
   "hooks": {
     "Stop": [
       {
-        "command": "zestful notify --agent \"codex:$(basename $PWD)\" --message 'Waiting for your input' --app \"$TERM_PROGRAM\""
+        "command": "zestful notify --agent \"codex:$(basename $PWD)\" --message 'Waiting for your input'"
       }
     ]
   }

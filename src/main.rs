@@ -33,17 +33,9 @@ enum Commands {
         #[arg(long, default_value = "warning", value_parser = ["info", "warning", "urgent"])]
         severity: String,
 
-        /// App to focus when alert is clicked
+        /// Terminal URI for click-to-focus (auto-detected if omitted)
         #[arg(long)]
-        app: Option<String>,
-
-        /// Window ID for focus (app-specific)
-        #[arg(long)]
-        window_id: Option<String>,
-
-        /// Tab ID for focus (app-specific)
-        #[arg(long)]
-        tab_id: Option<String>,
+        terminal_uri: Option<String>,
 
         /// Suppress push notification for this event
         #[arg(long)]
@@ -68,12 +60,6 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Set the terminal tab title (for click-to-focus matching)
-    Title {
-        /// Tab title to set (defaults to current directory name)
-        name: Option<String>,
-    },
-
     /// Start the focus daemon (usually auto-started)
     Daemon,
 }
@@ -81,8 +67,8 @@ enum Commands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Auto-start daemon for commands that might need it (not daemon/title)
-    if !matches!(cli.command, Commands::Daemon | Commands::Title { .. }) {
+    // Auto-start daemon for commands that need it
+    if !matches!(cli.command, Commands::Daemon) {
         config::ensure_daemon();
     }
 
@@ -91,17 +77,13 @@ fn main() -> anyhow::Result<()> {
             agent,
             message,
             severity,
-            app,
-            window_id,
-            tab_id,
+            terminal_uri,
             no_push,
-        } => cmd::notify::run(agent, message, severity, app, window_id, tab_id, no_push),
+        } => cmd::notify::run(agent, message, severity, terminal_uri, no_push),
 
         Commands::Watch { agent, command } => cmd::watch::run(agent, command),
 
         Commands::Ssh { args } => cmd::ssh::run(args),
-
-        Commands::Title { name } => cmd::title::run(name),
 
         Commands::Daemon => cmd::daemon::run(),
     }

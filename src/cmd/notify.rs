@@ -1,7 +1,8 @@
 //! `zestful notify` — send a notification to the Zestful Mac app.
 //!
 //! Builds a JSON payload and POSTs it to `localhost:{port}/notify` with the
-//! auth token. Applies saved focus context if `--app` is not explicitly passed.
+//! auth token. Auto-captures the terminal URI via `terminal-inspector` for
+//! click-to-focus.
 
 use crate::config;
 use anyhow::Result;
@@ -13,11 +14,7 @@ struct NotifyBody {
     message: String,
     severity: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    app: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    window_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tab_id: Option<String>,
+    terminal_uri: Option<String>,
     #[serde(skip_serializing_if = "is_true")]
     push: bool,
 }
@@ -26,14 +23,12 @@ fn is_true(v: &bool) -> bool {
     *v
 }
 
-/// Execute the `notify` command: read config, apply focus context, send HTTP POST.
+/// Execute the `notify` command: read config, auto-locate terminal, send HTTP POST.
 pub fn run(
     agent: String,
     message: String,
     severity: String,
-    app: Option<String>,
-    window_id: Option<String>,
-    tab_id: Option<String>,
+    terminal_uri: Option<String>,
     no_push: bool,
 ) -> Result<()> {
     let token = config::read_token().ok_or_else(|| {
@@ -41,33 +36,13 @@ pub fn run(
     })?;
     let port = config::read_port();
 
-    // Apply focus context if --app was not explicitly passed, or if the
-    // explicit value is a multiplexer (tmux/screen) which isn't focusable:
-    // 1. Try saved focus-context file
-    // 2. Fall back to auto-detecting the terminal (looks through tmux/screen)
-    let is_multiplexer = app.as_deref().map_or(false, |a| {
-        let lower = a.to_lowercase();
-        lower == "tmux" || lower == "screen"
-    });
-    let (app, window_id, tab_id) = if app.is_none() || is_multiplexer {
-        let ctx = config::read_focus_context();
-        let app = ctx
-            .get("app")
-            .cloned()
-            .or_else(|| config::detect_terminal());
-        let tab_id = tab_id
-            .or_else(|| ctx.get("tab_id").cloned())
-            .or_else(|| config::detect_tab_id());
-        (
-            app,
-            window_id.or_else(|| ctx.get("window_id").cloned()),
-            tab_id,
-        )
-    } else {
-        (app, window_id, tab_id)
-    };
+    // Use explicit URI if provided, otherwise auto-detect via terminal-inspector,
+    // falling back to saved URI file (written by `zestful ssh` for remote sessions)
+    let terminal_uri = terminal_uri
+        .or_else(|| terminal_inspector::locate().ok())
+        .or_else(|| config::read_terminal_uri());
 
-    send(&token, port, &agent, &message, &severity, app, window_id, tab_id, no_push)
+    send(&token, port, &agent, &message, &severity, terminal_uri, no_push)
 }
 
 /// Send a notification to the Zestful app. Used by both `notify` and `watch` commands.
@@ -77,18 +52,14 @@ pub fn send(
     agent: &str,
     message: &str,
     severity: &str,
-    app: Option<String>,
-    window_id: Option<String>,
-    tab_id: Option<String>,
+    terminal_uri: Option<String>,
     no_push: bool,
 ) -> Result<()> {
     let body = NotifyBody {
         agent: agent.to_string(),
         message: message.to_string(),
         severity: severity.to_string(),
-        app,
-        window_id,
-        tab_id,
+        terminal_uri,
         push: !no_push,
     };
 
@@ -103,11 +74,9 @@ pub fn send(
     match result {
         Ok(_) => {}
         Err(ureq::Error::StatusCode(code)) => {
-            // App responded but rejected the request — log but don't fail
             eprintln!("zestful: Zestful app returned HTTP {}", code);
         }
         Err(e) => {
-            // Connection-level failure — log but don't fail
             let reason = match &e {
                 ureq::Error::Io(_) => "connection refused",
                 ureq::Error::Timeout(_) => "timeout",
@@ -130,18 +99,14 @@ mod tests {
             agent: "test-agent".into(),
             message: "hello world".into(),
             severity: "warning".into(),
-            app: Some("kitty".into()),
-            window_id: Some("42".into()),
-            tab_id: Some("my-tab".into()),
+            terminal_uri: Some("terminal://iterm2/window:1/tab:2".into()),
             push: true,
         };
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["agent"], "test-agent");
         assert_eq!(json["message"], "hello world");
         assert_eq!(json["severity"], "warning");
-        assert_eq!(json["app"], "kitty");
-        assert_eq!(json["window_id"], "42");
-        assert_eq!(json["tab_id"], "my-tab");
+        assert_eq!(json["terminal_uri"], "terminal://iterm2/window:1/tab:2");
         // push=true should be skipped
         assert!(json.get("push").is_none());
     }
@@ -152,17 +117,12 @@ mod tests {
             agent: "test".into(),
             message: "msg".into(),
             severity: "info".into(),
-            app: None,
-            window_id: None,
-            tab_id: None,
+            terminal_uri: None,
             push: false,
         };
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["agent"], "test");
-        assert!(json.get("app").is_none());
-        assert!(json.get("window_id").is_none());
-        assert!(json.get("tab_id").is_none());
-        // push=false should be serialized
+        assert!(json.get("terminal_uri").is_none());
         assert_eq!(json["push"], false);
     }
 
@@ -172,35 +132,29 @@ mod tests {
             agent: "test".into(),
             message: "hello \"world\"\nnewline".into(),
             severity: "info".into(),
-            app: None,
-            window_id: None,
-            tab_id: None,
+            terminal_uri: None,
             push: true,
         };
         let json_str = serde_json::to_string(&body).unwrap();
-        // serde_json properly escapes special characters
         assert!(json_str.contains("\\\"world\\\""));
         assert!(json_str.contains("\\n"));
     }
 
     #[test]
     fn test_send_no_server_returns_ok() {
-        // Connection failure is not an error — CLI runs as a hook
-        let result = send("fake-token", 19999, "test", "msg", "info", None, None, None, false);
+        let result = send("fake-token", 19999, "test", "msg", "info", None, false);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_send_with_all_optional_fields() {
+    fn test_send_with_terminal_uri() {
         let result = send(
             "fake-token",
             19999,
             "test",
             "msg",
             "info",
-            Some("kitty".into()),
-            Some("1".into()),
-            Some("tab-1".into()),
+            Some("terminal://iterm2/window:1/tab:2".into()),
             true,
         );
         assert!(result.is_ok());
@@ -218,9 +172,7 @@ mod tests {
             agent: "a".into(),
             message: "m".into(),
             severity: "info".into(),
-            app: None,
-            window_id: None,
-            tab_id: None,
+            terminal_uri: None,
             push: false,
         };
         let json_str = serde_json::to_string(&body).unwrap();
@@ -233,9 +185,7 @@ mod tests {
             agent: "a".into(),
             message: "m".into(),
             severity: "info".into(),
-            app: None,
-            window_id: None,
-            tab_id: None,
+            terminal_uri: None,
             push: true,
         };
         let json_str = serde_json::to_string(&body).unwrap();

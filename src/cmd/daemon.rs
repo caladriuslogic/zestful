@@ -19,6 +19,9 @@ use std::fs;
 
 #[derive(Deserialize)]
 struct FocusRequest {
+    /// Terminal URI from terminal-inspector (e.g. terminal://iterm2/window:1/tab:2)
+    terminal_uri: Option<String>,
+    /// Legacy fields — used as fallback when terminal_uri is absent
     app: Option<String>,
     window_id: Option<String>,
     tab_id: Option<String>,
@@ -96,27 +99,41 @@ async fn handle_focus(
     // and the Mac app (the primary caller) does not send a token. This matches
     // the original Node.js daemon behavior.
 
-    let app = match req.app {
-        Some(app) if !app.is_empty() => app,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "app is required"})),
-            );
+    // Prefer terminal_uri; fall back to legacy app/window_id/tab_id fields
+    let (app, window_id, tab_id) = if let Some(ref uri) = req.terminal_uri {
+        match focus::parse_terminal_uri(uri) {
+            Some(parsed) => (parsed.app, parsed.window_id, parsed.tab_id),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid terminal_uri"})),
+                );
+            }
+        }
+    } else {
+        match req.app {
+            Some(app) if !app.is_empty() => (app, req.window_id, req.tab_id),
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "terminal_uri or app is required"})),
+                );
+            }
         }
     };
 
     eprintln!(
-        "[zestfuld] Focus: app={} window_id={} tab_id={}",
+        "[zestfuld] Focus: app={} window_id={} tab_id={} uri={}",
         app,
-        req.window_id.as_deref().unwrap_or(""),
-        req.tab_id.as_deref().unwrap_or("")
+        window_id.as_deref().unwrap_or(""),
+        tab_id.as_deref().unwrap_or(""),
+        req.terminal_uri.as_deref().unwrap_or("")
     );
 
     if let Err(e) = focus::handle_focus(
         &app,
-        req.window_id.as_deref(),
-        req.tab_id.as_deref(),
+        window_id.as_deref(),
+        tab_id.as_deref(),
     )
     .await
     {
@@ -185,7 +202,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_focus_missing_app() {
+    async fn test_focus_missing_app_and_uri() {
         let response = app()
             .oneshot(
                 Request::builder()
@@ -201,11 +218,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "app is required");
+        assert_eq!(json["error"], "terminal_uri or app is required");
     }
 
     #[tokio::test]
-    async fn test_focus_empty_app() {
+    async fn test_focus_empty_app_no_uri() {
         let response = app()
             .oneshot(
                 Request::builder()
@@ -222,7 +239,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_focus_valid_request() {
+    async fn test_focus_with_terminal_uri() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/focus")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"terminal_uri":"terminal://kitty/window:1/tab:2"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_focus_with_legacy_app() {
         let response = app()
             .oneshot(
                 Request::builder()
@@ -241,6 +280,28 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_focus_invalid_terminal_uri() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/focus")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"terminal_uri":"not-a-valid-uri"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid terminal_uri");
     }
 
     #[tokio::test]
