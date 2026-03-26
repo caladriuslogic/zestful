@@ -40,6 +40,10 @@ enum Commands {
         /// Suppress push notification for this event
         #[arg(long)]
         no_push: bool,
+
+        /// Print the detected terminal URI to stderr
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Run a command and notify when it finishes
@@ -79,7 +83,8 @@ fn main() -> anyhow::Result<()> {
             severity,
             terminal_uri,
             no_push,
-        } => cmd::notify::run(agent, message, severity, terminal_uri, no_push),
+            debug,
+        } => cmd::notify::run(agent, message, severity, terminal_uri, no_push, debug),
 
         Commands::Watch { agent, command } => cmd::watch::run(agent, command),
 

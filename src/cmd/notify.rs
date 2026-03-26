@@ -30,6 +30,7 @@ pub fn run(
     severity: String,
     terminal_uri: Option<String>,
     no_push: bool,
+    debug: bool,
 ) -> Result<()> {
     let token = config::read_token().ok_or_else(|| {
         anyhow::anyhow!("Zestful app not running or not configured. Token not found.")
@@ -41,6 +42,10 @@ pub fn run(
     let terminal_uri = terminal_uri
         .or_else(|| terminal_inspector::locate().ok())
         .or_else(|| config::read_terminal_uri());
+
+    if debug {
+        eprintln!("zestful: uri={}", terminal_uri.as_deref().unwrap_or("none"));
+    }
 
     send(&token, port, &agent, &message, &severity, terminal_uri, no_push)
 }
