@@ -1,0 +1,56 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "notify",
+      "cargo": {
+        "args": ["build", "--bin=zestful"]
+      },
+      "args": [
+        "notify",
+        "--agent", "claude-code",
+        "--message", "Task complete",
+        "--severity", "warning"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "watch",
+      "cargo": {
+        "args": ["build", "--bin=zestful"]
+      },
+      "args": [
+        "watch",
+        "echo", "hello"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "daemon",
+      "cargo": {
+        "args": ["build", "--bin=zestful"]
+      },
+      "args": ["daemon"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "ssh",
+      "cargo": {
+        "args": ["build", "--bin=zestful"]
+      },
+      "args": [
+        "ssh",
+        "user@hostname"
+      ],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}
