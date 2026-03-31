@@ -7,6 +7,7 @@
 #[cfg(target_os = "macos")]
 pub mod iterm2;
 pub mod kitty;
+pub mod powershell;
 pub mod shelldon;
 pub mod terminal;
 pub mod wezterm;
@@ -86,6 +87,7 @@ pub fn parse_terminal_uri(uri: &str) -> Option<ParsedTerminalUri> {
     let app = match *raw_app {
         "iterm2" => "iTerm2".to_string(),
         "kitty" => "kitty".to_string(),
+        "powershell" => "PowerShell".to_string(),
         "wezterm" => "WezTerm".to_string(),
         "terminal" | "apple_terminal" => "Terminal".to_string(),
         other => other.to_string(),
@@ -148,6 +150,8 @@ pub async fn handle_focus(app: &str, window_id: Option<&str>, tab_id: Option<&st
         {
             activate_generic(app).await
         }
+    } else if lower.contains("powershell") {
+        powershell::focus(window_id).await
     } else if lower.contains("wezterm") {
         wezterm::focus(tab_id).await
     } else if lower.contains("terminal") {
@@ -194,6 +198,12 @@ mod tests {
     async fn test_handle_focus_dispatches_kitty() {
         // Should not panic even though kitty isn't running
         let result = handle_focus("kitty", None, None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_focus_dispatches_powershell() {
+        let result = handle_focus("PowerShell", Some("1234"), None).await;
         assert!(result.is_ok());
     }
 
@@ -294,6 +304,14 @@ mod tests {
         assert!(parse_terminal_uri("not-a-uri").is_none());
         assert!(parse_terminal_uri("workspace://").is_none());
         assert!(parse_terminal_uri("http://iterm2/window:1").is_none());
+    }
+
+    #[test]
+    fn test_parse_terminal_uri_powershell() {
+        let parsed = parse_terminal_uri("workspace://powershell/window:5678").unwrap();
+        assert_eq!(parsed.app, "PowerShell");
+        assert_eq!(parsed.window_id.as_deref(), Some("5678"));
+        assert!(parsed.tab_id.is_none());
     }
 
     #[test]

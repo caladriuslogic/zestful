@@ -5,6 +5,7 @@
       "type": "lldb",
       "request": "launch",
       "name": "notify",
+      "preLaunchTask": "kill-zestful",
       "cargo": {
         "args": ["build", "--bin=zestful"]
       },
@@ -20,6 +21,7 @@
       "type": "lldb",
       "request": "launch",
       "name": "watch",
+      "preLaunchTask": "kill-zestful",
       "cargo": {
         "args": ["build", "--bin=zestful"]
       },
@@ -33,6 +35,7 @@
       "type": "lldb",
       "request": "launch",
       "name": "daemon",
+      "preLaunchTask": "kill-zestful",
       "cargo": {
         "args": ["build", "--bin=zestful"]
       },
@@ -43,6 +46,7 @@
       "type": "lldb",
       "request": "launch",
       "name": "ssh",
+      "preLaunchTask": "kill-zestful",
       "cargo": {
         "args": ["build", "--bin=zestful"]
       },
