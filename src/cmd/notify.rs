@@ -75,29 +75,44 @@ pub fn send(
         push: !no_push,
     };
 
-    let url = format!("http://127.0.0.1:{}/notify", port);
     let json = serde_json::to_string(&body)?;
 
     crate::log::log("notify", &format!("sending {} bytes: {}", json.len(), json));
 
-    let result = ureq::post(&url)
-        .header("X-Zestful-Token", token)
-        .header("Content-Type", "application/json")
-        .send(json.as_bytes());
+    // Raw TCP to avoid HTTP library connection pooling issues
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
 
-    match result {
-        Ok(_) => {}
-        Err(ureq::Error::StatusCode(code)) => {
-            crate::log::log("notify", &format!("app returned HTTP {}", code));
+    let request = format!(
+        "POST /notify HTTP/1.1\r\n\
+         Host: 127.0.0.1:{}\r\n\
+         Content-Type: application/json\r\n\
+         X-Zestful-Token: {}\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        port, token, json.len(), json
+    );
+
+    match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+        Ok(mut stream) => {
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).ok();
+            if let Err(e) = stream.write_all(request.as_bytes()) {
+                crate::log::log("notify", &format!("write error: {}", e));
+            } else {
+                let mut response = Vec::new();
+                let _ = stream.read_to_end(&mut response);
+                let resp = String::from_utf8_lossy(&response);
+                if let Some(status_line) = resp.lines().next() {
+                    if !status_line.contains("200") {
+                        crate::log::log("notify", &format!("app returned: {}", status_line));
+                    }
+                }
+            }
         }
         Err(e) => {
-            let reason = match &e {
-                ureq::Error::Io(_) => "connection refused",
-                ureq::Error::Timeout(_) => "timeout",
-                ureq::Error::HostNotFound => "host not found",
-                _ => "request failed",
-            };
-            crate::log::log("notify", &format!("could not reach app ({})", reason));
+            crate::log::log("notify", &format!("could not reach app ({})", e));
         }
     }
     Ok(())

@@ -6,7 +6,6 @@ description = "CLI for the Zestful agent notification app"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-ureq = "3"
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "io-util", "signal"] }
 serde = { version = "1", features = ["derive"] }
