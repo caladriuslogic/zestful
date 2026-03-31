@@ -44,8 +44,8 @@ pub fn run(
         .or_else(|| config::read_terminal_uri());
 
     crate::log::log("notify", &format!(
-        "agent={} severity={} uri={} push={}",
-        agent, severity,
+        "agent={} severity={} message=\"{}\" uri={} push={}",
+        agent, severity, message,
         terminal_uri.as_deref().unwrap_or("none"),
         !no_push
     ));
