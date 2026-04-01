@@ -28,17 +28,29 @@ fn focus_sync(tab_id: Option<&str>) -> Result<()> {
         let escaped = super::escape_applescript(tab_id);
         format!(
             r#"tell application "Terminal"
-  activate
   set target_tab to "{}"
-  repeat with w in windows
-    repeat with t in tabs of w
-      if tty of t contains target_tab then
-        set selected tab of w to t
-        set index of w to 1
-        return
-      end if
+  try
+    repeat with w in windows
+      try
+        repeat with t in tabs of w
+          try
+            if tty of t contains target_tab then
+              set selected tab of w to t
+              set index of w to 1
+              activate
+              return
+            end if
+          on error
+            -- tab may have closed; skip it
+          end try
+        end repeat
+      on error
+        -- window may have closed; skip it
+      end try
     end repeat
-  end repeat
+  on error
+    -- windows list changed during iteration; ignore
+  end try
 end tell"#,
             escaped
         )
