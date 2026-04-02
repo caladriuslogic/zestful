@@ -1,23 +1,18 @@
-//! `zestful test-focus` — cycle through all detected terminal URIs with focus.
+//! `zestful test-focus` — cycle through all detected terminal/browser URIs with focus.
 
 use anyhow::Result;
 
-pub fn run() -> Result<()> {
-    let output = crate::workspace::inspect_terminals()?;
+pub fn run(app: Option<String>) -> Result<()> {
+    let filter = app.unwrap_or_else(|| "terminal".to_string()).to_lowercase();
 
-    let uris: Vec<String> = output
-        .iter()
-        .flat_map(|term| term.windows.iter())
-        .flat_map(|win| win.tabs.iter())
-        .filter_map(|tab| tab.uri.clone())
-        .collect();
+    let uris = collect_uris(&filter)?;
 
     if uris.is_empty() {
-        eprintln!("zestful: no terminal tabs detected");
+        eprintln!("zestful: no tabs detected for app filter \"{}\"", filter);
         return Ok(());
     }
 
-    println!("Found {} terminal tab(s). Cycling through...", uris.len());
+    println!("Found {} tab(s) matching \"{}\". Cycling through...", uris.len(), filter);
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
@@ -26,13 +21,22 @@ pub fn run() -> Result<()> {
 
             let parsed = crate::workspace::uri::parse_terminal_uri(uri);
             if let Some(p) = parsed {
-                if let Err(e) = crate::workspace::terminals::handle_focus(
-                    &p.app,
-                    p.window_id.as_deref(),
-                    p.tab_id.as_deref(),
-                )
-                .await
-                {
+                let result = if is_browser_app(&p.app) {
+                    crate::workspace::browsers::handle_focus(
+                        &p.app,
+                        p.window_id.as_deref(),
+                        p.tab_id.as_deref(),
+                    )
+                    .await
+                } else {
+                    crate::workspace::terminals::handle_focus(
+                        &p.app,
+                        p.window_id.as_deref(),
+                        p.tab_id.as_deref(),
+                    )
+                    .await
+                };
+                if let Err(e) = result {
                     eprintln!("    error: {}", e);
                 }
             } else {
@@ -45,4 +49,37 @@ pub fn run() -> Result<()> {
 
     println!("Done.");
     Ok(())
+}
+
+fn collect_uris(filter: &str) -> Result<Vec<String>> {
+    let mut uris = Vec::new();
+
+    // Terminal tabs
+    let terminals = crate::workspace::inspect_terminals()?;
+    uris.extend(
+        terminals
+            .iter()
+            .filter(|t| t.app.to_lowercase().contains(filter))
+            .flat_map(|t| t.windows.iter())
+            .flat_map(|w| w.tabs.iter())
+            .filter_map(|tab| tab.uri.clone()),
+    );
+
+    // Browser tabs
+    let browsers = crate::workspace::inspect_browsers()?;
+    uris.extend(
+        browsers
+            .iter()
+            .filter(|b| b.app.to_lowercase().contains(filter))
+            .flat_map(|b| b.windows.iter())
+            .flat_map(|w| w.tabs.iter())
+            .filter_map(|tab| tab.uri.clone()),
+    );
+
+    Ok(uris)
+}
+
+fn is_browser_app(app: &str) -> bool {
+    let lower = app.to_lowercase();
+    lower.contains("chrome") || lower.contains("safari") || lower.contains("firefox")
 }

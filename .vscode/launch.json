@@ -87,12 +87,34 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "test-focus",
+      "name": "test-focus (Terminal)",
       "preLaunchTask": "kill-zestful",
       "cargo": {
         "args": ["build", "--bin=zestful"]
       },
-      "args": ["test-focus"],
+      "args": ["test-focus", "--app", "terminal"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "test-focus (iTerm2)",
+      "preLaunchTask": "kill-zestful",
+      "cargo": {
+        "args": ["build", "--bin=zestful"]
+      },
+      "args": ["test-focus", "--app", "iterm2"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "test-focus (Chrome)",
+      "preLaunchTask": "kill-zestful",
+      "cargo": {
+        "args": ["build", "--bin=zestful"]
+      },
+      "args": ["test-focus", "--app", "chrome"],
       "cwd": "${workspaceFolder}"
     }
   ]

@@ -98,14 +98,18 @@ enum Commands {
     },
 
     /// Cycle through all detected terminal tabs with focus (1s delay between each)
-    TestFocus,
+    TestFocus {
+        /// App name to filter by (default: terminal)
+        #[arg(long, default_value = "terminal")]
+        app: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Auto-start daemon for commands that need it
-    if !matches!(cli.command, Commands::Daemon | Commands::Inspect { .. } | Commands::Focus { .. } | Commands::TestFocus) {
+    if !matches!(cli.command, Commands::Daemon | Commands::Inspect { .. } | Commands::Focus { .. } | Commands::TestFocus { .. }) {
         config::ensure_daemon();
     }
 
@@ -131,6 +135,6 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Inspect { command, pretty } => cmd::inspect::run(command, pretty),
 
-        Commands::TestFocus => cmd::test_focus::run(),
+        Commands::TestFocus { app } => cmd::test_focus::run(Some(app)),
     }
 }

@@ -73,6 +73,32 @@ end tell"#,
     }))
 }
 
+/// Focus a Chrome tab by window ID and tab index.
+pub async fn focus(window_id: &str, tab_index: u32) -> anyhow::Result<()> {
+    let win_id: i64 = window_id.parse().unwrap_or(-1);
+    let script = format!(
+        r#"tell application "Google Chrome"
+  try
+    set w to window id {}
+    set active tab index of w to {}
+    set index of w to 1
+    activate
+  on error
+  end try
+end tell"#,
+        win_id, tab_index
+    );
+
+    tokio::task::spawn_blocking(move || {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output();
+    })
+    .await?;
+
+    Ok(())
+}
+
 fn get_chrome_pid() -> Option<u32> {
     let output = Command::new("pgrep")
         .args(["-x", "Google Chrome"])
