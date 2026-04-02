@@ -1,9 +1,12 @@
 //! Google Chrome detection and focus for Windows.
 //!
-//! Uses PowerShell to find chrome.exe processes with visible windows and
-//! enumerate their titles. Chrome's tab API is not accessible without the
-//! remote debugging protocol, so each visible top-level Chrome window is
-//! reported as a single tab using the window title.
+//! Detection uses EnumWindows (C# P/Invoke) to find Chrome top-level windows,
+//! then Windows UI Automation to enumerate the individual tabs within each
+//! window — no remote debugging port required.
+//!
+//! Focus uses UI Automation SelectionItemPattern (falling back to InvokePattern)
+//! to activate the specific tab, then Win32 ShowWindow+SetForegroundWindow to
+//! restore and raise the window.
 
 use anyhow::Result;
 use std::process::Command;
@@ -11,10 +14,8 @@ use std::process::Command;
 use crate::workspace::types::{BrowserInstance, BrowserTab, BrowserWindow};
 
 pub fn detect() -> Result<Option<BrowserInstance>> {
-    // Chrome uses a single browser process for all windows, so MainWindowHandle
-    // only gives one entry. Use EnumWindows via C# to find all top-level visible
-    // Chrome windows and their titles.
     let script = r#"
+try { Add-Type -AssemblyName UIAutomationClient; Add-Type -AssemblyName UIAutomationTypes } catch {}
 try { Add-Type -TypeDefinition '
 using System;
 using System.Collections.Generic;
@@ -46,22 +47,47 @@ public class ZestfulEnum {
         return results;
     }
 }' } catch {}
+
 $chromePids = [uint32[]](Get-Process -Name chrome -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
 if ($chromePids.Count -eq 0) { exit }
-[ZestfulEnum]::FindChromeWindows($chromePids) | ForEach-Object { $_ }
+
+$tabCond = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::TabItem
+)
+
+[ZestfulEnum]::FindChromeWindows($chromePids) | ForEach-Object {
+    $parts = $_ -split '\|', 3
+    $hwnd = [long]$parts[1]
+    $fallback = ($parts[2] -replace ' - Google Chrome$', '').Trim()
+
+    try {
+        $ae = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$hwnd)
+        $tabs = $ae.FindAll([System.Windows.Automation.TreeScope]::Descendants, $tabCond)
+        if ($tabs.Count -gt 0) {
+            for ($i = 0; $i -lt $tabs.Count; $i++) {
+                "$hwnd|$($i + 1)|$($tabs[$i].Current.Name)"
+            }
+        } else {
+            "$hwnd|1|$fallback"
+        }
+    } catch {
+        "$hwnd|1|$fallback"
+    }
+}
 "#;
 
     let output = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()?;
 
-    if !output.status.success() {
-        return Ok(None);
-    }
-
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut windows: Vec<BrowserWindow> = Vec::new();
+    let mut windows: std::collections::BTreeMap<String, Vec<BrowserTab>> =
+        std::collections::BTreeMap::new();
     let mut first_pid: Option<u32> = None;
+
+    // Collect PIDs per hwnd so we can populate BrowserInstance.pid
+    let mut hwnd_pid: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
 
     for line in stdout.trim().lines() {
         let line = line.trim();
@@ -69,36 +95,34 @@ if ($chromePids.Count -eq 0) { exit }
             continue;
         }
 
-        // Format: pid|hwnd|title
+        // Format: hwnd|tabIndex|tabTitle  (note: pid removed, hwnd is first)
+        // But we still get pid from parts[0] in the old C# output.
+        // The new script outputs hwnd|index|title directly.
         let parts: Vec<&str> = line.splitn(3, '|').collect();
         if parts.len() < 3 {
             continue;
         }
 
-        let pid: u32 = match parts[0].parse() {
-            Ok(p) => p,
+        let hwnd = parts[0].to_string();
+        let tab_index: u32 = match parts[1].parse() {
+            Ok(i) => i,
             Err(_) => continue,
         };
-        let hwnd = parts[1].to_string();
+        let title = parts[2].trim().to_string();
 
-        // Strip the " - Google Chrome" suffix Chrome appends to all window titles
-        let title = parts[2]
-            .trim_end_matches(" - Google Chrome")
-            .trim()
-            .to_string();
-
+        // Track first hwnd as pid proxy (we don't have pid in the new format,
+        // but BrowserInstance.pid is optional and only used for display)
         if first_pid.is_none() {
-            first_pid = Some(pid);
+            // Use hwnd as a stand-in; it's only informational
+            first_pid = hwnd.parse().ok().map(|h: i64| h as u32);
         }
+        hwnd_pid.entry(hwnd.clone()).or_insert(0);
 
-        windows.push(BrowserWindow {
-            id: hwnd,
-            tabs: vec![BrowserTab {
-                index: 1,
-                uri: None,
-                title,
-                active: false,
-            }],
+        windows.entry(hwnd).or_default().push(BrowserTab {
+            index: tab_index,
+            uri: None,
+            title,
+            active: false,
         });
     }
 
@@ -106,37 +130,68 @@ if ($chromePids.Count -eq 0) { exit }
         return Ok(None);
     }
 
+    let browser_windows: Vec<BrowserWindow> = windows
+        .into_iter()
+        .map(|(id, tabs)| BrowserWindow { id, tabs })
+        .collect();
+
     Ok(Some(BrowserInstance {
         app: "Google Chrome".to_string(),
         pid: first_pid,
-        windows,
+        windows: browser_windows,
     }))
 }
 
-/// Focus a Chrome window by process ID using Win32 via PowerShell.
-pub async fn focus(window_id: &str) -> Result<()> {
+/// Focus a Chrome window and select a specific tab using UI Automation.
+pub async fn focus(window_id: &str, tab_id: Option<&str>) -> Result<()> {
     let window_id = window_id.to_string();
-    tokio::task::spawn_blocking(move || focus_sync(&window_id)).await??;
+    let tab_id = tab_id.map(String::from);
+    tokio::task::spawn_blocking(move || focus_sync(&window_id, tab_id.as_deref())).await??;
     Ok(())
 }
 
-fn focus_sync(window_id: &str) -> Result<()> {
-    // window_id is the HWND as a decimal string (from EnumWindows in detect())
+fn focus_sync(window_id: &str, tab_id: Option<&str>) -> Result<()> {
     let hwnd: i64 = match window_id.parse() {
         Ok(h) => h,
         Err(_) => return Ok(()),
     };
 
-    let add_type = r#"try { Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class ZestfulWin32 { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n); [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); }' } catch {}"#;
+    let tab_index: u32 = tab_id.and_then(|t| t.parse().ok()).unwrap_or(1);
 
-    let activate = format!(
-        "$hwnd = [IntPtr]{}; \
-         [ZestfulWin32]::ShowWindow($hwnd, 9); \
-         [ZestfulWin32]::SetForegroundWindow($hwnd)",
-        hwnd
+    let script = format!(
+        r#"
+try {{ Add-Type -AssemblyName UIAutomationClient; Add-Type -AssemblyName UIAutomationTypes }} catch {{}}
+try {{ Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class ZestfulWin32 {{ [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n); [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); }}' }} catch {{}}
+
+$hwnd = [IntPtr]{hwnd}
+[ZestfulWin32]::ShowWindow($hwnd, 9)
+[ZestfulWin32]::SetForegroundWindow($hwnd)
+
+try {{
+    $ae = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+    $tabCond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::TabItem
+    )
+    $tabs = $ae.FindAll([System.Windows.Automation.TreeScope]::Descendants, $tabCond)
+    $idx = {tab_index} - 1
+    if ($idx -ge 0 -and $idx -lt $tabs.Count) {{
+        $tab = $tabs[$idx]
+        try {{
+            $pat = $tab.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+            $pat.Select()
+        }} catch {{
+            try {{
+                $pat = $tab.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+                $pat.Invoke()
+            }} catch {{}}
+        }}
+    }}
+}} catch {{}}
+"#,
+        hwnd = hwnd,
+        tab_index = tab_index
     );
-
-    let script = format!("{}; {}", add_type, activate);
 
     let _ = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
@@ -156,13 +211,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_focus_no_panic() {
-        let result = focus("99999").await;
+        let result = focus("99999", None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_focus_with_tab_no_panic() {
+        let result = focus("99999", Some("1")).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_focus_non_numeric_no_panic() {
-        let result = focus("not-a-pid").await;
+        let result = focus("not-a-hwnd", None).await;
         assert!(result.is_ok());
     }
 }

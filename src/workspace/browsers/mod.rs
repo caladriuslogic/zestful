@@ -22,7 +22,7 @@ pub async fn handle_focus(app: &str, window_id: Option<&str>, tab_id: Option<&st
         }
         #[cfg(target_os = "windows")]
         {
-            chrome_windows::focus(win_id).await?;
+            chrome_windows::focus(win_id, tab_id).await?;
         }
     } else {
         // Generic: just activate the app
