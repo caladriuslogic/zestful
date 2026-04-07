@@ -15,6 +15,8 @@ mod gnome_terminal;
 pub mod cmd;
 #[cfg(target_os = "windows")]
 pub mod powershell;
+#[cfg(target_os = "windows")]
+pub mod windows_terminal;
 
 use anyhow::Result;
 
@@ -60,12 +62,19 @@ pub fn detect_all() -> Result<Vec<TerminalEmulator>> {
 
     #[cfg(target_os = "windows")]
     {
-        if let Ok(Some(t)) = cmd::detect() {
+        // Windows Terminal takes priority: if it's running, report its tabs directly and
+        // skip the classic cmd/powershell detectors to avoid duplicate entries.
+        // If WT is not running, fall back to the classic per-process detectors.
+        if let Ok(Some(t)) = windows_terminal::detect() {
             terminals.push(t);
-        }
+        } else {
+            if let Ok(Some(t)) = cmd::detect() {
+                terminals.push(t);
+            }
 
-        if let Ok(Some(t)) = powershell::detect() {
-            terminals.push(t);
+            if let Ok(Some(t)) = powershell::detect() {
+                terminals.push(t);
+            }
         }
     }
 
@@ -84,7 +93,19 @@ pub async fn handle_focus(app: &str, window_id: Option<&str>, tab_id: Option<&st
 
     let lower = app.to_lowercase();
 
-    if lower == "cmd" {
+    if lower == "windows terminal" {
+        #[cfg(target_os = "windows")]
+        {
+            match window_id {
+                Some(wid) => windows_terminal::focus(wid, tab_id).await,
+                None => Ok(()),
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(())
+        }
+    } else if lower == "cmd" {
         #[cfg(target_os = "windows")]
         {
             cmd::focus(window_id).await
@@ -136,6 +157,12 @@ mod tests {
     #[tokio::test]
     async fn test_handle_focus_dispatches_kitty() {
         let result = handle_focus("kitty", None, None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_focus_dispatches_windows_terminal() {
+        let result = handle_focus("Windows Terminal", Some("99999"), Some("1")).await;
         assert!(result.is_ok());
     }
 

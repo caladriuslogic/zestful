@@ -131,6 +131,17 @@
     {
       "type": "lldb",
       "request": "launch",
+      "name": "test-focus (Windows Terminal)",
+      "preLaunchTask": "kill-zestful",
+      "cargo": {
+        "args": ["build", "--bin=zestful"]
+      },
+      "args": ["test-focus", "--app", "windows terminal"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
       "name": "test-focus (Chrome)",
       "preLaunchTask": "kill-zestful",
       "cargo": {
