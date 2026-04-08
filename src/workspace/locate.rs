@@ -18,8 +18,9 @@ pub fn locate() -> Result<String> {
         }
     }
 
-    // On Windows, detect Windows Terminal via process parent chain + UI Automation.
-    // (TTY-based detection does not apply on Windows.)
+    // On Windows, detect the host terminal. Try Windows Terminal first (covers Win 11
+    // defterm and Win 10 with WT installed), then fall back to classic cmd/powershell
+    // consoles for Windows 10 without WT.
     #[cfg(target_os = "windows")]
     if segments.is_empty() {
         if let Some((hwnd, tab_idx)) = find_windows_terminal() {
@@ -28,6 +29,9 @@ pub fn locate() -> Result<String> {
             if let Some(idx) = tab_idx {
                 segments.push(format!("tab:{}", idx));
             }
+        } else if let Some((app, pid)) = find_classic_console() {
+            segments.push(app);
+            segments.push(format!("window:{}", pid));
         }
     }
 
@@ -154,6 +158,47 @@ try {
     let tab_idx: u32 = parts[1].trim().parse().ok()?;
 
     Some((hwnd, Some(tab_idx)))
+}
+
+/// On Windows 10 without Windows Terminal, walk the parent process chain to find a
+/// classic cmd.exe or powershell.exe console host. The PID is used as the window ID,
+/// matching the format produced by cmd::detect() and powershell::detect().
+/// Returns (app_slug, pid_string), e.g. ("cmd", "1234") or ("powershell", "5678").
+#[cfg(target_os = "windows")]
+fn find_classic_console() -> Option<(String, String)> {
+    let script = r#"
+$pid2 = $PID
+$procMap = @{}
+Get-CimInstance Win32_Process | ForEach-Object {
+    $procMap[[uint32]$_.ProcessId] = [PSCustomObject]@{ ppid = [uint32]$_.ParentProcessId; name = $_.Name.ToLower() }
+}
+$cur = [uint32]$pid2
+for ($i = 0; $i -lt 10 -and $cur -gt 1; $i++) {
+    $entry = $procMap[$cur]
+    if (-not $entry) { break }
+    if ($entry.name -eq 'cmd.exe') { Write-Output "cmd|$cur"; exit }
+    if ($entry.name -eq 'powershell.exe' -or $entry.name -eq 'pwsh.exe') { Write-Output "powershell|$cur"; exit }
+    $cur = $entry.ppid
+}
+"#;
+
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    let parts: Vec<&str> = line.splitn(2, '|').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    Some((parts[0].trim().to_string(), parts[1].trim().to_string()))
 }
 
 /// Walk up the process tree from our PID to find a TTY.
