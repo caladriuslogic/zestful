@@ -166,24 +166,26 @@ try {
 /// Returns (app_slug, pid_string), e.g. ("cmd", "1234") or ("powershell", "5678").
 #[cfg(target_os = "windows")]
 fn find_classic_console() -> Option<(String, String)> {
-    let script = r#"
-$pid2 = $PID
-$procMap = @{}
-Get-CimInstance Win32_Process | ForEach-Object {
-    $procMap[[uint32]$_.ProcessId] = [PSCustomObject]@{ ppid = [uint32]$_.ParentProcessId; name = $_.Name.ToLower() }
-}
-$cur = [uint32]$pid2
-for ($i = 0; $i -lt 10 -and $cur -gt 1; $i++) {
+    // Pass our own PID explicitly — do NOT use $PID inside the script, which is the
+    // spawned powershell.exe process and would match itself as "powershell" immediately.
+    let our_pid = std::process::id();
+    let script = format!(r#"
+$procMap = @{{}}
+Get-CimInstance Win32_Process | ForEach-Object {{
+    $procMap[[uint32]$_.ProcessId] = [PSCustomObject]@{{ ppid = [uint32]$_.ParentProcessId; name = $_.Name.ToLower() }}
+}}
+$cur = [uint32]{our_pid}
+for ($i = 0; $i -lt 10 -and $cur -gt 1; $i++) {{
     $entry = $procMap[$cur]
-    if (-not $entry) { break }
-    if ($entry.name -eq 'cmd.exe') { Write-Output "cmd|$cur"; exit }
-    if ($entry.name -eq 'powershell.exe' -or $entry.name -eq 'pwsh.exe') { Write-Output "powershell|$cur"; exit }
+    if (-not $entry) {{ break }}
+    if ($entry.name -eq 'cmd.exe') {{ Write-Output "cmd|$cur"; exit }}
+    if ($entry.name -eq 'powershell.exe' -or $entry.name -eq 'pwsh.exe') {{ Write-Output "powershell|$cur"; exit }}
     $cur = $entry.ppid
-}
-"#;
+}}
+"#);
 
     let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
         .ok()?;
 
