@@ -248,6 +248,8 @@ fn find_terminal_for_tty(tty: &str) -> Result<Option<(String, String, Option<u32
     // For tmux, we need the TTY of the tmux client, not the pane TTY.
     let tty_to_match = if std::env::var("TMUX").is_ok() {
         find_tmux_client_tty().unwrap_or_else(|| tty.to_string())
+    } else if let Ok(client_tty) = std::env::var("SHELLDON_CLIENT_TTY") {
+        if !client_tty.is_empty() { client_tty } else { tty.to_string() }
     } else {
         tty.to_string()
     };
