@@ -230,24 +230,29 @@ fn open_wt_tabs(tab_count: usize) -> (Vec<(String, u32)>, WtGuard) {
 
     let before = wt_shell_pids_snapshot();
 
-    // wt cmd.exe /k [; new-tab cmd.exe /k ...]
-    // No --window flag: WT routes all `;`-separated subcommands into the
-    // same window (last-used or a new one), which is what we want.
-    // --window new was removed because on some WT versions it creates a
-    // separate window for every new-tab subcommand instead.
-    let mut args: Vec<&str> = vec!["cmd.exe", "/k"];
+    // Open the first tab in a new WT instance, then add subsequent tabs
+    // via `wt -w 0 new-tab` which explicitly targets the last-used WT
+    // window.  The semicolon syntax proved unreliable — some WT versions
+    // treat each `; new-tab` as a separate window invocation.
+    Command::new("wt.exe")
+        .args(["cmd.exe", "/k"])
+        .spawn()
+        .expect("failed to spawn wt.exe for first tab");
+
+    // Give WT time to fully start before adding more tabs.
+    std::thread::sleep(Duration::from_millis(2000));
+
     for _ in 1..tab_count {
-        args.extend_from_slice(&[";", "new-tab", "cmd.exe", "/k"]);
+        Command::new("wt.exe")
+            .args(["-w", "0", "new-tab", "cmd.exe", "/k"])
+            .spawn()
+            .expect("failed to add WT tab via -w 0 new-tab");
+        // Brief pause between tabs so WT registers each one.
+        std::thread::sleep(Duration::from_millis(1000));
     }
 
-    Command::new("wt.exe")
-        .args(&args)
-        .spawn()
-        .expect("failed to spawn wt.exe");
-
-    // Allow ~2 s for WT to start plus ~1 s per additional tab.
-    let wait_ms = 2000 + (tab_count.saturating_sub(1) as u64 * 1000);
-    std::thread::sleep(Duration::from_millis(wait_ms));
+    // Final settle time.
+    std::thread::sleep(Duration::from_millis(500));
 
     let terminal = super::windows_terminal::detect()
         .expect("windows_terminal::detect() returned Err")
