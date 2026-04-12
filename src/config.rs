@@ -194,6 +194,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_libc_kill_current_process() {
         let pid = std::process::id() as i32;
         assert!(libc_kill(pid));
