@@ -230,8 +230,12 @@ fn open_wt_tabs(tab_count: usize) -> (Vec<(String, u32)>, WtGuard) {
 
     let before = wt_shell_pids_snapshot();
 
-    // wt --window new cmd.exe /k [; new-tab cmd.exe /k ...]
-    let mut args: Vec<&str> = vec!["--window", "new", "cmd.exe", "/k"];
+    // wt cmd.exe /k [; new-tab cmd.exe /k ...]
+    // No --window flag: WT routes all `;`-separated subcommands into the
+    // same window (last-used or a new one), which is what we want.
+    // --window new was removed because on some WT versions it creates a
+    // separate window for every new-tab subcommand instead.
+    let mut args: Vec<&str> = vec!["cmd.exe", "/k"];
     for _ in 1..tab_count {
         args.extend_from_slice(&[";", "new-tab", "cmd.exe", "/k"]);
     }
