@@ -18,6 +18,9 @@ pub mod powershell;
 #[cfg(target_os = "windows")]
 pub mod windows_terminal;
 
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests;
+
 use anyhow::Result;
 
 use crate::workspace::types::TerminalEmulator;

@@ -157,7 +157,7 @@ pub struct BrowserTab {
     pub active: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TerminalEmulator {
     pub app: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,13 +165,13 @@ pub struct TerminalEmulator {
     pub windows: Vec<TerminalWindow>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TerminalWindow {
     pub id: String,
     pub tabs: Vec<TerminalTab>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TerminalTab {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
