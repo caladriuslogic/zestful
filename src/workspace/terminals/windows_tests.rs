@@ -169,6 +169,15 @@ fn no_false_positives_from_background_cmd() {
 
 // ── Windows Terminal helpers ──────────────────────────────────────────────────
 
+/// Mutex that serializes all Windows Terminal tests.
+///
+/// `cargo test` runs tests on multiple threads by default.  The WT tests
+/// share a single WT window (via `wt -w 0 new-tab`) and share cleanup
+/// responsibilities, so parallel execution causes guards to kill each
+/// other's shells.  Holding this lock for the lifetime of each WT test
+/// ensures they run one at a time.
+static WT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Returns true if `wt.exe` is available on this system.
 fn wt_available() -> bool {
     // Check the standard MSIX install location first.
@@ -203,48 +212,134 @@ fn wt_shell_pids_snapshot() -> std::collections::HashSet<u32> {
         .unwrap_or_default()
 }
 
-/// RAII guard that force-kills WT-hosted shell processes when dropped.
-/// Windows Terminal closes the tab automatically once its shell exits.
+/// RAII guard that cleans up all processes opened by the test.
+///
+/// Strategy:
+///   1. Kill every hosted shell PID so the shells cannot become orphaned
+///      standalone console windows.
+///   2. Sleep briefly so WT has time to reap the exited shells.
+///   3. Kill any `WindowsTerminal.exe` processes that were newly created by
+///      the test (identified by a before/after PID snapshot).
+///   4. If no new WT processes were created (the test added tabs to the
+///      user's *existing* WT window), close those specific frame windows by
+///      deriving their owner PID from the stored HWNDs.  This handles the
+///      common case of running tests from inside a WT session.
 struct WtGuard {
     shell_pids: Vec<u32>,
+    /// WT process PIDs that were freshly spawned for this test.
+    wt_pids: Vec<u32>,
+    /// WT frame window HWNDs that received tabs during this test.
+    frame_hwnds: Vec<i64>,
 }
 
 impl Drop for WtGuard {
     fn drop(&mut self) {
+        // Step 1 — kill hosted shells.
         for pid in &self.shell_pids {
             let _ = Command::new("taskkill")
                 .args(["/F", "/PID", &pid.to_string()])
                 .output();
         }
+
+        // Step 2 — brief pause for WT to detect the shell exits.
+        std::thread::sleep(Duration::from_millis(800));
+
+        // Step 3 — kill any WT processes we explicitly spawned.
+        for pid in &self.wt_pids {
+            let _ = Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string()])
+                .output();
+        }
+
+        // Step 4 — close any WT windows that still host our HWNDs.
+        // This fires when the test added tabs to a pre-existing WT window
+        // (so wt_pids is empty) or when Step 3 was a no-op.
+        if self.frame_hwnds.is_empty() {
+            return;
+        }
+        let hwnd_list = self
+            .frame_hwnds
+            .iter()
+            .map(|h| h.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = format!(
+            r#"
+try {{ Add-Type -TypeDefinition '
+using System; using System.Runtime.InteropServices;
+public class ZestfulWtClean {{
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+}}' -ErrorAction SilentlyContinue }} catch {{}}
+foreach ($hwnd in @({hwnd_list})) {{
+    $ptr = [IntPtr][long]$hwnd
+    if ([ZestfulWtClean]::IsWindow($ptr)) {{
+        $p = [uint32]0
+        [ZestfulWtClean]::GetWindowThreadProcessId($ptr, [ref]$p) | Out-Null
+        if ($p -gt 0) {{ & taskkill /F /PID $p 2>$null }}
+    }}
+}}"#,
+            hwnd_list = hwnd_list
+        );
+        let _ = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output();
     }
 }
 
-/// Opens Windows Terminal with `tab_count` cmd.exe tabs in a brand-new window
-/// (`--window new`).  Returns `(hwnd, shell_pid)` pairs for the new tabs plus
-/// a cleanup guard.
+/// Returns the PIDs of all currently running Windows Terminal processes.
+/// Covers both the stable release (`WindowsTerminal.exe`) and the preview
+/// build (`WindowsTerminalPreview.exe`).
+fn wt_process_pids() -> std::collections::HashSet<u32> {
+    let mut pids = std::collections::HashSet::new();
+    for name in &["WindowsTerminal", "WindowsTerminalPreview"] {
+        for pid in crate::workspace::process::find_pids_by_name(name) {
+            pids.insert(pid);
+        }
+    }
+    pids
+}
+
+/// Returns the shell args for the Nth tab (0-based), alternating between
+/// cmd.exe (even) and powershell.exe (odd).
+fn tab_shell_args(index: usize) -> Vec<&'static str> {
+    if index % 2 == 0 {
+        vec!["cmd.exe", "/k"]
+    } else {
+        vec!["powershell.exe", "-NoExit", "-Command", "$null"]
+    }
+}
+
+/// Opens Windows Terminal with `tab_count` tabs, alternating cmd.exe / powershell.exe.
+/// Returns `(hwnd, shell_pid)` pairs for the new tabs plus a cleanup guard.
 ///
 /// Uses a before/after snapshot of detected shell PIDs to identify the tabs
 /// that belong to this test, so existing WT windows are not disturbed.
+/// Uses a before/after snapshot of WindowsTerminal.exe PIDs to identify which
+/// WT processes were spawned by this test, so only those windows are closed on cleanup.
 fn open_wt_tabs(tab_count: usize) -> (Vec<(String, u32)>, WtGuard) {
     assert!(tab_count >= 1);
 
-    let before = wt_shell_pids_snapshot();
+    let shell_before = wt_shell_pids_snapshot();
+    let wt_before = wt_process_pids();
 
     // Open the first tab in a new WT instance, then add subsequent tabs
     // via `wt -w 0 new-tab` which explicitly targets the last-used WT
     // window.  The semicolon syntax proved unreliable — some WT versions
     // treat each `; new-tab` as a separate window invocation.
     Command::new("wt.exe")
-        .args(["cmd.exe", "/k"])
+        .args(tab_shell_args(0))
         .spawn()
         .expect("failed to spawn wt.exe for first tab");
 
     // Give WT time to fully start before adding more tabs.
     std::thread::sleep(Duration::from_millis(2000));
 
-    for _ in 1..tab_count {
+    for i in 1..tab_count {
+        let mut args = vec!["-w", "0", "new-tab"];
+        args.extend_from_slice(&tab_shell_args(i));
         Command::new("wt.exe")
-            .args(["-w", "0", "new-tab", "cmd.exe", "/k"])
+            .args(&args)
             .spawn()
             .expect("failed to add WT tab via -w 0 new-tab");
         // Brief pause between tabs so WT registers each one.
@@ -253,6 +348,8 @@ fn open_wt_tabs(tab_count: usize) -> (Vec<(String, u32)>, WtGuard) {
 
     // Final settle time.
     std::thread::sleep(Duration::from_millis(500));
+
+    let wt_after = wt_process_pids();
 
     let terminal = super::windows_terminal::detect()
         .expect("windows_terminal::detect() returned Err")
@@ -268,11 +365,26 @@ fn open_wt_tabs(tab_count: usize) -> (Vec<(String, u32)>, WtGuard) {
                 .iter()
                 .filter_map(move |t| t.shell_pid.map(|pid| (hwnd.clone(), pid)))
         })
-        .filter(|(_, pid)| !before.contains(pid))
+        .filter(|(_, pid)| !shell_before.contains(pid))
+        .collect();
+
+    // New WT processes are those absent in the before-snapshot.
+    let new_wt_pids: Vec<u32> = wt_after.difference(&wt_before).copied().collect();
+
+    // Unique WT frame HWNDs that received our tabs — used as a fallback to
+    // close the window when wt_pids is empty (tabs added to existing WT).
+    let frame_hwnds: Vec<i64> = new_tabs
+        .iter()
+        .map(|(h, _)| h.parse::<i64>().unwrap_or(0))
+        .filter(|&h| h != 0)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
         .collect();
 
     let guard = WtGuard {
         shell_pids: new_tabs.iter().map(|(_, pid)| *pid).collect(),
+        wt_pids: new_wt_pids,
+        frame_hwnds,
     };
 
     (new_tabs, guard)
@@ -283,6 +395,7 @@ fn open_wt_tabs(tab_count: usize) -> (Vec<(String, u32)>, WtGuard) {
 #[test]
 #[ignore = "opens Windows Terminal with 2 tabs; run with: cargo test -- --ignored"]
 fn detect_wt_two_tabs() {
+    let _wt_lock = WT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if !wt_available() {
         eprintln!("wt.exe not found — skipping");
         return;
@@ -316,6 +429,7 @@ fn detect_wt_two_tabs() {
 #[test]
 #[ignore = "opens Windows Terminal with 3 tabs; run with: cargo test -- --ignored"]
 fn detect_wt_three_tabs() {
+    let _wt_lock = WT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if !wt_available() {
         eprintln!("wt.exe not found — skipping");
         return;
@@ -343,6 +457,7 @@ fn detect_wt_three_tabs() {
 #[test]
 #[ignore = "opens Windows Terminal; verifies each tab has a shell_pid; run with: cargo test -- --ignored"]
 fn detect_wt_tabs_have_shell_pids() {
+    let _wt_lock = WT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if !wt_available() {
         eprintln!("wt.exe not found — skipping");
         return;
@@ -365,6 +480,7 @@ fn detect_wt_tabs_have_shell_pids() {
 #[tokio::test]
 #[ignore = "opens Windows Terminal with 2 tabs and cycles focus; run with: cargo test -- --ignored"]
 async fn focus_wt_two_tabs() {
+    let _wt_lock = WT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if !wt_available() {
         eprintln!("wt.exe not found — skipping");
         return;
