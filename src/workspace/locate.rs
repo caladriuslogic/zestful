@@ -443,6 +443,38 @@ fn detect_tmux() -> Result<Option<Vec<String>>> {
         return Ok(None);
     }
 
+    // TMUX_PANE is set by tmux for each pane and inherited by child processes,
+    // including hooks spawned by agents. Use it to query the specific pane we're
+    // running in, rather than the currently focused pane.
+    if let Ok(pane_id) = std::env::var("TMUX_PANE") {
+        if !pane_id.is_empty() {
+            let output = Command::new("tmux")
+                .args([
+                    "display-message",
+                    "-t",
+                    &pane_id,
+                    "-p",
+                    "#{session_name}\t#{window_index}\t#{pane_index}",
+                ])
+                .output();
+
+            if let Ok(ref o) = output {
+                if o.status.success() {
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    let parts: Vec<&str> = stdout.trim().split('\t').collect();
+                    if parts.len() >= 3 {
+                        return Ok(Some(vec![
+                            format!("tmux:{}", parts[0]),
+                            format!("window:{}", parts[1]),
+                            format!("pane:{}", parts[2]),
+                        ]));
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: use display-message without target (returns the focused pane)
     let output = Command::new("tmux")
         .args([
             "display-message",
