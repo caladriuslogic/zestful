@@ -6,7 +6,7 @@
 
 use anyhow::{bail, Result};
 
-use crate::workspace::{multiplexers, terminals, uri};
+use crate::workspace::{browsers, multiplexers, terminals, uri};
 
 /// Execute the `focus` command.
 pub fn run(
@@ -35,13 +35,26 @@ pub fn run(
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        if let Err(e) = terminals::handle_focus(
-            &parsed.app,
-            parsed.window_id.as_deref(),
-            parsed.tab_id.as_deref(),
-        )
-        .await
-        {
+        let app_lower = parsed.app.to_lowercase();
+        let is_browser = app_lower.contains("chrome")
+            || app_lower.contains("safari")
+            || app_lower.contains("firefox");
+        let focus_result = if is_browser {
+            browsers::handle_focus(
+                &parsed.app,
+                parsed.window_id.as_deref(),
+                parsed.tab_id.as_deref(),
+            )
+            .await
+        } else {
+            terminals::handle_focus(
+                &parsed.app,
+                parsed.window_id.as_deref(),
+                parsed.tab_id.as_deref(),
+            )
+            .await
+        };
+        if let Err(e) = focus_result {
             crate::log::log("focus", &format!("focus error: {}", e));
             eprintln!("zestful: focus error: {}", e);
         }

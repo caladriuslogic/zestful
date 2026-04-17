@@ -94,14 +94,14 @@ end tell"#,
             win_id, tab_id
         )
     } else {
-        // Large number: look up tab by its unique id within the window
+        // Large number: look up tab by its unique id (AppleScript returns it as text) within the window
         format!(
             r#"tell application "Google Chrome"
   try
     set w to window id {}
     set tabList to tabs of w
     repeat with i from 1 to count of tabList
-      if id of (item i of tabList) is {} then
+      if (id of (item i of tabList) as text) is "{}" then
         set active tab index of w to i
         exit repeat
       end if
