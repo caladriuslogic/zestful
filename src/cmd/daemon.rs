@@ -5,7 +5,7 @@
 //! Requires `X-Zestful-Token` authentication.
 
 use crate::config;
-use crate::workspace::{terminals, uri};
+use crate::workspace::{browsers, terminals, uri};
 use anyhow::Result;
 use axum::{
     extract::{DefaultBodyLimit, Json},
@@ -138,14 +138,25 @@ async fn handle_focus(
         req.terminal_uri.as_deref().unwrap_or("")
     ));
 
-    // Focus the terminal emulator tab
-    if let Err(e) = terminals::handle_focus(
-        &parsed.app,
-        parsed.window_id.as_deref(),
-        parsed.tab_id.as_deref(),
-    )
-    .await
-    {
+    // Focus the app — route browsers to the browser handler, everything else to terminals
+    let app_lower = parsed.app.to_lowercase();
+    let is_browser = app_lower.contains("chrome") || app_lower.contains("safari") || app_lower.contains("firefox");
+    let focus_result = if is_browser {
+        browsers::handle_focus(
+            &parsed.app,
+            parsed.window_id.as_deref(),
+            parsed.tab_id.as_deref(),
+        )
+        .await
+    } else {
+        terminals::handle_focus(
+            &parsed.app,
+            parsed.window_id.as_deref(),
+            parsed.tab_id.as_deref(),
+        )
+        .await
+    };
+    if let Err(e) = focus_result {
         crate::log::log("daemon", &format!("focus error: {}", e));
     }
 

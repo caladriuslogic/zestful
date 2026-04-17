@@ -116,6 +116,7 @@ pub fn parse_terminal_uri(uri: &str) -> Option<ParsedTerminalUri> {
         "wezterm" => "WezTerm".to_string(),
         "terminal" | "apple_terminal" => "Terminal".to_string(),
         "windows-terminal" => "Windows Terminal".to_string(),
+        "chrome" => "Google Chrome".to_string(),
         other => other.to_string(),
     };
 
