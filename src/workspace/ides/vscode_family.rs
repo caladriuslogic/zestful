@@ -45,6 +45,16 @@ impl Family {
             Family::Windsurf => "windsurf",
         }
     }
+    /// URL scheme registered by each editor's bundle. The Zestful extension
+    /// becomes reachable at `<scheme>://zestfuldev.zestful/...` in whichever
+    /// host it's installed.
+    fn url_scheme(self) -> &'static str {
+        match self {
+            Family::VSCode => "vscode",
+            Family::Cursor => "cursor",
+            Family::Windsurf => "windsurf",
+        }
+    }
     fn app_bundle_name(self) -> &'static str {
         match self {
             Family::VSCode => "Visual Studio Code",
@@ -66,6 +76,28 @@ impl Family {
             Family::Windsurf => "Windsurf",
         }
     }
+}
+
+/// Focus a specific integrated terminal in a VS Code-family editor by
+/// opening the URI handler the Zestful VS Code extension registers. The
+/// extension finds the terminal across all open windows and calls show().
+pub async fn focus_terminal(family: Family, terminal_id: &str) -> Result<()> {
+    let url = format!(
+        "{}://zestfuldev.zestful/focus?terminal={}",
+        family.url_scheme(),
+        terminal_id
+    );
+    // Bring the host editor to the front first so the URL handler lands on
+    // an actually-frontmost window of the right app.
+    let app_name = family.app_bundle_name().to_string();
+    tokio::task::spawn_blocking(move || {
+        crate::workspace::uri::activate_app_sync(&app_name);
+        let _ = std::process::Command::new("/usr/bin/open")
+            .arg(&url)
+            .status();
+    })
+    .await?;
+    Ok(())
 }
 
 /// Focus a VS Code-family project window. If `project_id` is given, resolve

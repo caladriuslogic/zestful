@@ -25,19 +25,30 @@ pub fn detect_all() -> Result<Vec<IdeInstance>> {
 }
 
 /// Dispatch focus to the right IDE handler. Called from the daemon when a
-/// `workspace://<ide>/project:<name>` URI arrives.
-pub async fn handle_focus(app: &str, project_id: Option<&str>) -> Result<()> {
+/// `workspace://<ide>/...` URI arrives. The URI may carry a `project:<name>`
+/// (workspace-level focus) or a `terminal:<id>` (integrated terminal focus
+/// via the Zestful VS Code extension).
+pub async fn handle_focus(app: &str, project_id: Option<&str>, terminal_id: Option<&str>) -> Result<()> {
     let lower = app.to_lowercase();
 
     #[cfg(target_os = "macos")]
     {
         if lower == "vscode" || lower.contains("visual studio code") {
+            if let Some(tid) = terminal_id {
+                return vscode_family::focus_terminal(Family::VSCode, tid).await;
+            }
             return vscode_family::focus(Family::VSCode, project_id).await;
         }
         if lower == "cursor" {
+            if let Some(tid) = terminal_id {
+                return vscode_family::focus_terminal(Family::Cursor, tid).await;
+            }
             return vscode_family::focus(Family::Cursor, project_id).await;
         }
         if lower == "windsurf" {
+            if let Some(tid) = terminal_id {
+                return vscode_family::focus_terminal(Family::Windsurf, tid).await;
+            }
             return vscode_family::focus(Family::Windsurf, project_id).await;
         }
         if lower == "xcode" {
@@ -45,7 +56,7 @@ pub async fn handle_focus(app: &str, project_id: Option<&str>) -> Result<()> {
         }
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = (lower, project_id);
+    let _ = (lower, project_id, terminal_id);
 
     // Generic fallback: just activate the app by name.
     crate::workspace::uri::activate_generic(app).await

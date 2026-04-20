@@ -137,6 +137,7 @@ async fn handle_focus(
                 window_id: req.window_id,
                 tab_id: req.tab_id,
                 project_id: None,
+                terminal_id: None,
                 shelldon: None,
                 tmux: None,
             },
@@ -163,6 +164,7 @@ async fn handle_focus(
     let app_lower = parsed.app.to_lowercase();
     let is_browser = app_lower.contains("chrome") || app_lower.contains("safari") || app_lower.contains("firefox");
     let is_ide = parsed.project_id.is_some()
+        || parsed.terminal_id.is_some()
         || app_lower == "xcode"
         || app_lower == "vscode"
         || app_lower.contains("visual studio code")
@@ -170,7 +172,11 @@ async fn handle_focus(
         || app_lower == "windsurf"
         || app_lower == "zed";
     let focus_result = if is_ide {
-        ides::handle_focus(&parsed.app, parsed.project_id.as_deref()).await
+        ides::handle_focus(
+            &parsed.app,
+            parsed.project_id.as_deref(),
+            parsed.terminal_id.as_deref(),
+        ).await
     } else if is_browser {
         browsers::handle_focus(
             &parsed.app,

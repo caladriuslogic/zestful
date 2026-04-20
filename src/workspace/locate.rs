@@ -10,6 +10,20 @@ use crate::workspace::types::TerminalEmulator;
 pub fn locate() -> Result<String> {
     let mut segments: Vec<String> = Vec::new();
 
+    // VS Code-family integrated terminals: the Zestful VS Code extension drops
+    // a state file per window; if our shell PID matches one, we can emit a
+    // precise URI like `workspace://vscode/terminal:1234-5`. Falls back to
+    // `workspace://<editor>/project:<name>` when the process is inside a
+    // VS Code-family editor but not in a tracked integrated terminal (e.g.
+    // Cursor's sidebar AI agent).
+    #[cfg(target_os = "macos")]
+    if segments.is_empty() {
+        if let Some((slug, id_segment)) = detect_vscode_family_terminal() {
+            segments.push(slug);
+            segments.push(id_segment);
+        }
+    }
+
     // Kitty sets KITTY_WINDOW_ID in each shell — use it directly
     if let Ok(kitty_win_id) = std::env::var("KITTY_WINDOW_ID") {
         if !kitty_win_id.is_empty() {
@@ -64,12 +78,12 @@ pub fn locate() -> Result<String> {
         segments.extend(mux_segments);
     }
 
+    // If we didn't identify any terminal / IDE / browser, don't emit a
+    // placeholder URI — the notification should go through with no
+    // terminal_uri (so no Focus button is offered). `workspace://unknown`
+    // and `workspace://tty:<name>` are never actionable.
     if segments.is_empty() {
-        if let Some(tty_name) = find_our_tty() {
-            segments.push(format!("tty:{}", tty_name.replace("/dev/", "")));
-        } else {
-            segments.push("unknown".into());
-        }
+        anyhow::bail!("locate: no recognizable workspace context");
     }
 
     Ok(format!("workspace://{}", segments.join("/")))
@@ -413,6 +427,144 @@ fn find_shelldon_tty() -> Option<String> {
 }
 
 /// Detect if we're inside an SSH session.
+/// Match result from the VS Code-family detector.
+#[cfg(target_os = "macos")]
+enum VSCodeMatch {
+    /// Exact integrated-terminal hit: `workspace://<slug>/terminal:<id>`
+    Terminal { slug: String, terminal_id: String },
+    /// No terminal match but we're inside the editor's process tree, so we
+    /// at least know the editor and its open workspace folder.
+    Project { slug: String, project_name: String },
+}
+
+#[cfg(target_os = "macos")]
+fn detect_vscode_family_terminal() -> Option<(String, String)> {
+    match detect_vscode_family()? {
+        VSCodeMatch::Terminal { slug, terminal_id } => Some((slug, format!("terminal:{}", terminal_id))),
+        VSCodeMatch::Project { slug, project_name } => Some((slug, format!("project:{}", project_name))),
+    }
+}
+
+/// Walk the process tree from our PID; if any ancestor matches a `shellPid`
+/// in any VS Code-family extension state file at
+/// `~/.config/zestful/vscode/*.json`, return a Terminal match. Otherwise,
+/// if an ancestor matches a recorded extension-host `windowPid`, return a
+/// Project match so non-terminal agents (e.g. Cursor's sidebar AI) still
+/// emit a useful URI.
+#[cfg(target_os = "macos")]
+fn detect_vscode_family() -> Option<VSCodeMatch> {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct StateFile {
+        #[serde(rename = "windowPid")]
+        window_pid: Option<u32>,
+        #[serde(rename = "appName")]
+        app_name: Option<String>,
+        #[serde(rename = "workspaceFolder")]
+        workspace_folder: Option<String>,
+        terminals: Option<Vec<TerminalEntry>>,
+    }
+    #[derive(Deserialize)]
+    struct TerminalEntry {
+        id: String,
+        #[serde(rename = "shellPid")]
+        shell_pid: Option<u32>,
+    }
+
+    let dir = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)?
+        .join(".config/zestful/vscode");
+    let entries = std::fs::read_dir(&dir).ok()?;
+
+    let mut term_by_pid: std::collections::HashMap<u32, (String, String)> =
+        std::collections::HashMap::new();
+    // windowPid → (slug, project_name) for the project-level fallback.
+    let mut window_by_pid: std::collections::HashMap<u32, (String, String)> =
+        std::collections::HashMap::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else { continue };
+        let Ok(state) = serde_json::from_str::<StateFile>(&contents) else { continue };
+        let app = state.app_name.unwrap_or_default();
+        let slug = match app.as_str() {
+            "Cursor" => "cursor".to_string(),
+            "Windsurf" => "windsurf".to_string(),
+            _ => "vscode".to_string(),
+        };
+        if let Some(wpid) = state.window_pid {
+            let project_name = state.workspace_folder.as_deref()
+                .and_then(|p| std::path::Path::new(p).file_name().map(|s| s.to_string_lossy().into_owned()))
+                .unwrap_or_default();
+            if !project_name.is_empty() {
+                window_by_pid.insert(wpid, (slug.clone(), project_name));
+            }
+        }
+        for term in state.terminals.unwrap_or_default() {
+            if let Some(pid) = term.shell_pid {
+                term_by_pid.insert(pid, (slug.clone(), term.id));
+            }
+        }
+    }
+
+    if term_by_pid.is_empty() && window_by_pid.is_empty() {
+        crate::log::log("locate", "vscode-family: no VS Code-family state files");
+        return None;
+    }
+
+    // Walk up, checking terminal match first (more specific), then window match.
+    let start_pid = std::process::id();
+    let mut current = start_pid;
+    let mut chain = Vec::new();
+    for _ in 0..30 {
+        chain.push(current);
+        if let Some((slug, id)) = term_by_pid.get(&current) {
+            crate::log::log("locate", &format!(
+                "vscode-family: matched terminal shellPid={} → {}/{}",
+                current, slug, id
+            ));
+            return Some(VSCodeMatch::Terminal {
+                slug: slug.clone(),
+                terminal_id: id.clone(),
+            });
+        }
+        if let Some((slug, name)) = window_by_pid.get(&current) {
+            crate::log::log("locate", &format!(
+                "vscode-family: matched extension-host windowPid={} → {}/project:{}",
+                current, slug, name
+            ));
+            return Some(VSCodeMatch::Project {
+                slug: slug.clone(),
+                project_name: name.clone(),
+            });
+        }
+        let output = std::process::Command::new("ps")
+            .args(["-p", &current.to_string(), "-o", "ppid="])
+            .output()
+            .ok()?;
+        let ppid: u32 = std::str::from_utf8(&output.stdout)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        if ppid == 0 || ppid == 1 || ppid == current {
+            break;
+        }
+        current = ppid;
+    }
+    crate::log::log("locate", &format!(
+        "vscode-family: no match. start={} chain={:?} terms={:?} windows={:?}",
+        start_pid, chain,
+        term_by_pid.keys().collect::<Vec<_>>(),
+        window_by_pid.keys().collect::<Vec<_>>()
+    ));
+    None
+}
+
 fn detect_ssh() -> Option<Vec<String>> {
     let ssh_conn = std::env::var("SSH_CONNECTION").ok()?;
 

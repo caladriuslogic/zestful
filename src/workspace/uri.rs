@@ -23,6 +23,10 @@ pub struct ParsedTerminalUri {
     /// IDE project name from a `project:NAME` segment, e.g. "shelldon" in
     /// `workspace://vscode/project:shelldon`.
     pub project_id: Option<String>,
+    /// VS Code-family terminal id from a `terminal:ID` segment, e.g.
+    /// "1234-5" in `workspace://vscode/terminal:1234-5`. Set by the
+    /// Zestful VS Code extension.
+    pub terminal_id: Option<String>,
     pub shelldon: Option<ShelldonInfo>,
     pub tmux: Option<TmuxInfo>,
 }
@@ -43,6 +47,7 @@ pub fn parse_terminal_uri(uri: &str) -> Option<ParsedTerminalUri> {
     let mut window_id = None;
     let mut tab_id = None;
     let mut project_id: Option<String> = None;
+    let mut terminal_id: Option<String> = None;
     let mut shelldon = None;
 
     let mut in_shelldon = false;
@@ -94,6 +99,8 @@ pub fn parse_terminal_uri(uri: &str) -> Option<ParsedTerminalUri> {
             tab_id = Some(id.to_string());
         } else if let Some(id) = part.strip_prefix("project:") {
             project_id = Some(id.to_string());
+        } else if let Some(id) = part.strip_prefix("terminal:") {
+            terminal_id = Some(id.to_string());
         }
     }
 
@@ -131,6 +138,7 @@ pub fn parse_terminal_uri(uri: &str) -> Option<ParsedTerminalUri> {
         window_id,
         tab_id,
         project_id,
+        terminal_id,
         shelldon,
         tmux,
     })
