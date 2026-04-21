@@ -408,6 +408,44 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
+    use tempfile::TempDir;
+
+    /// Redirect `$HOME` (or `%USERPROFILE%` on Windows) to a tempdir for the
+    /// duration of a test, restoring on drop. Required so `set_test_token` /
+    /// `config::read_token` operate on an isolated filesystem and never touch
+    /// the real user's token file.
+    struct HomeGuard {
+        old_home: Option<String>,
+        _td: TempDir,
+    }
+
+    impl HomeGuard {
+        fn new() -> Self {
+            let td = TempDir::new().unwrap();
+            let home_var = if cfg!(target_os = "windows") {
+                "USERPROFILE"
+            } else {
+                "HOME"
+            };
+            let old_home = std::env::var(home_var).ok();
+            std::env::set_var(home_var, td.path());
+            HomeGuard { old_home, _td: td }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            let home_var = if cfg!(target_os = "windows") {
+                "USERPROFILE"
+            } else {
+                "HOME"
+            };
+            match &self.old_home {
+                Some(v) => std::env::set_var(home_var, v),
+                None => std::env::remove_var(home_var),
+            }
+        }
+    }
 
     fn app() -> Router {
         Router::new()
@@ -640,6 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn events_rejects_missing_token() {
+        let _home = HomeGuard::new();
         let body = serde_json::to_string(&canned_envelope()).unwrap();
         let resp = send_events_request(&body, None).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -647,6 +686,7 @@ mod tests {
 
     #[tokio::test]
     async fn events_accepts_valid_single_envelope() {
+        let _home = HomeGuard::new();
         set_test_token("test-token-single");
         let body = serde_json::to_string(&canned_envelope()).unwrap();
         let resp = send_events_request(&body, Some("test-token-single")).await;
@@ -659,6 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn events_accepts_batch() {
+        let _home = HomeGuard::new();
         set_test_token("test-token-batch");
         let batch = serde_json::json!({
             "events": [canned_envelope(), canned_envelope(), canned_envelope()],
@@ -673,6 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn events_rejects_missing_required_field() {
+        let _home = HomeGuard::new();
         set_test_token("test-token-required");
         let mut env = canned_envelope();
         env.as_object_mut().unwrap().remove("ts");
@@ -687,6 +729,7 @@ mod tests {
 
     #[tokio::test]
     async fn events_rejects_unsupported_schema_version() {
+        let _home = HomeGuard::new();
         set_test_token("test-token-schema");
         let mut env = canned_envelope();
         env["schema"] = serde_json::json!(99);
@@ -700,6 +743,7 @@ mod tests {
 
     #[tokio::test]
     async fn events_rejects_malformed_ulid() {
+        let _home = HomeGuard::new();
         set_test_token("test-token-ulid");
         let mut env = canned_envelope();
         env["id"] = serde_json::json!("short");
@@ -710,6 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn events_accepts_unknown_type() {
+        let _home = HomeGuard::new();
         set_test_token("test-token-unknown");
         let mut env = canned_envelope();
         env["type"] = serde_json::json!("future.undefined_type");
@@ -720,6 +765,7 @@ mod tests {
 
     #[tokio::test]
     async fn events_batch_all_or_nothing_reports_index() {
+        let _home = HomeGuard::new();
         set_test_token("test-token-index");
         let mut bad = canned_envelope();
         bad.as_object_mut().unwrap().remove("host");
