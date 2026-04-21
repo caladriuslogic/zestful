@@ -12,11 +12,11 @@ use std::time::Duration;
 const BACKEND_URL: &str = "https://zestful-api.fly.dev/v1/events";
 const JWT_FILE: &str = "supabase.jwt";
 
-static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
+static HTTP_CLIENT: Lazy<Option<Client>> = Lazy::new(|| {
     Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-        .expect("build reqwest client")
+        .ok()
 });
 
 /// Spawn a background task that POSTs `envelopes` to the backend. Returns
@@ -33,8 +33,15 @@ pub fn spawn_forward(envelopes: Vec<serde_json::Value>) {
                 return;
             }
         };
+        let client = match &*HTTP_CLIENT {
+            Some(c) => c,
+            None => {
+                crate::log::log("events", "http client unavailable; skipping backend forward");
+                return;
+            }
+        };
         let body = serde_json::json!({ "events": envelopes });
-        match HTTP_CLIENT
+        match client
             .post(BACKEND_URL)
             .bearer_auth(&jwt)
             .json(&body)
@@ -45,9 +52,19 @@ pub fn spawn_forward(envelopes: Vec<serde_json::Value>) {
             Ok(resp) => {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
+                let summary = if text.len() > 256 {
+                    let end = text.char_indices()
+                        .map(|(i, _)| i)
+                        .take_while(|&i| i <= 256)
+                        .last()
+                        .unwrap_or(0);
+                    format!("{}…", &text[..end])
+                } else {
+                    text
+                };
                 crate::log::log(
                     "events",
-                    &format!("backend returned {}: {}", status, text),
+                    &format!("backend returned {}: {}", status, summary),
                 );
             }
             Err(e) => {
