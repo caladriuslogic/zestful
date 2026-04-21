@@ -1,0 +1,7 @@
+//! Event protocol emission for Zestful.
+//!
+//! Maps agent-hook stdin payloads into structured events and POSTs them to
+//! the Rust daemon on `127.0.0.1:21548/events`. Best-effort: errors never
+//! propagate to callers.
+
+pub mod preview;
