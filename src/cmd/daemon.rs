@@ -308,6 +308,10 @@ async fn handle_events(
         );
     }
 
+    // Forward accepted envelopes to the Fly backend in the background.
+    // Best-effort — never blocks the handler's response.
+    crate::events::backend_forwarder::spawn_forward(envelopes.clone());
+
     (
         StatusCode::OK,
         Json(EventsResponse {

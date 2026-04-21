@@ -4,6 +4,7 @@
 //! the Rust daemon on `127.0.0.1:21548/events`. Best-effort: errors never
 //! propagate to callers.
 
+pub mod backend_forwarder;
 pub mod device;
 pub mod envelope;
 pub mod map;
