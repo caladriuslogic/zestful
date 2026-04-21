@@ -5,6 +5,9 @@ pub mod vscode_family;
 #[cfg(target_os = "macos")]
 mod xcode;
 
+#[cfg(target_os = "windows")]
+pub mod vscode_family_windows;
+
 use crate::workspace::types::IdeInstance;
 use anyhow::Result;
 
@@ -17,6 +20,13 @@ pub fn detect_all() -> Result<Vec<IdeInstance>> {
             ides.push(instance);
         }
         if let Ok(more) = vscode_family::detect_all() {
+            ides.extend(more.into_iter().filter(|i| !i.projects.is_empty()));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(more) = vscode_family_windows::detect_all() {
             ides.extend(more.into_iter().filter(|i| !i.projects.is_empty()));
         }
     }
@@ -59,7 +69,30 @@ pub async fn handle_focus(
             return xcode_focus(project_id).await;
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        use vscode_family_windows::Family;
+        if lower == "vscode" || lower.contains("visual studio code") {
+            if let Some(tid) = terminal_id {
+                return vscode_family_windows::focus_terminal(Family::VSCode, tid).await;
+            }
+            return vscode_family_windows::focus(Family::VSCode, project_id).await;
+        }
+        if lower == "cursor" {
+            if let Some(tid) = terminal_id {
+                return vscode_family_windows::focus_terminal(Family::Cursor, tid).await;
+            }
+            return vscode_family_windows::focus(Family::Cursor, project_id).await;
+        }
+        if lower == "windsurf" {
+            if let Some(tid) = terminal_id {
+                return vscode_family_windows::focus_terminal(Family::Windsurf, tid).await;
+            }
+            return vscode_family_windows::focus(Family::Windsurf, project_id).await;
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = (lower, project_id, terminal_id);
 
     // Generic fallback: just activate the app by name.
@@ -68,6 +101,9 @@ pub async fn handle_focus(
 
 #[cfg(target_os = "macos")]
 pub use vscode_family::Family;
+
+#[cfg(target_os = "windows")]
+pub use vscode_family_windows::Family;
 
 #[cfg(target_os = "macos")]
 async fn xcode_focus(_project_id: Option<&str>) -> Result<()> {
