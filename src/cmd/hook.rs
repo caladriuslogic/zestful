@@ -172,5 +172,52 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
         !policy.push,
     )?;
 
+    // Also emit structured events to the daemon. Best-effort — errors never
+    // propagate. This path runs independently of the legacy /notify path.
+    let envelopes = crate::events::map_hook_payload(agent_kind, &payload);
+    if !envelopes.is_empty() {
+        if let Err(e) = crate::events::send_to_daemon(&envelopes) {
+            crate::log::log("hook", &format!("event emission failed: {}", e));
+        }
+    }
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::events::map_hook_payload;
+    use crate::hooks::AgentKind;
+    use serde_json::json;
+
+    #[test]
+    fn hook_canned_claude_code_user_prompt_produces_event() {
+        let payload = json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "write a test",
+            "cwd": "/tmp/proj",
+            "session_id": "sess_1",
+        });
+        let envs = map_hook_payload(AgentKind::ClaudeCode, &payload);
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].type_, "turn.prompt_submitted");
+        assert_eq!(envs[0].source, "claude-code");
+        assert_eq!(
+            envs[0].payload["prompt_preview"].as_str().unwrap(),
+            "write a test"
+        );
+        // correlation.session_id flows through.
+        let corr = envs[0].correlation.as_ref().unwrap();
+        assert_eq!(corr.session_id.as_deref(), Some("sess_1"));
+    }
+
+    #[test]
+    fn hook_canned_cursor_before_read_file_produces_no_events() {
+        let payload = json!({
+            "hook_event_name": "beforeReadFile",
+            "path": "/etc/passwd",
+        });
+        let envs = map_hook_payload(AgentKind::Cursor, &payload);
+        assert!(envs.is_empty());
+    }
 }

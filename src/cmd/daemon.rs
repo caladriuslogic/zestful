@@ -9,7 +9,7 @@ use crate::workspace::{browsers, ides, terminals, uri};
 use anyhow::Result;
 use axum::{
     extract::{DefaultBodyLimit, Json},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Router,
@@ -30,6 +30,21 @@ struct FocusRequest {
 #[derive(Serialize)]
 struct StatusResponse {
     status: String,
+}
+
+/// A request body on `POST /events` is either a single envelope or a batch.
+/// We accept both and normalize to a Vec at handling time.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EventsBody {
+    Batch { events: Vec<serde_json::Value> },
+    Single(serde_json::Value),
+}
+
+#[derive(Serialize)]
+struct EventsResponse {
+    status: &'static str,
+    accepted: usize,
 }
 
 /// Start the focus daemon. Creates a tokio runtime and runs the axum server.
@@ -68,7 +83,11 @@ async fn run_server() -> Result<()> {
         .route("/health", get(health))
         .route("/focus", post(handle_focus))
         .route("/inspect", get(handle_inspect))
-        .layer(DefaultBodyLimit::max(16_384)); // 16 KB
+        .layer(DefaultBodyLimit::max(16_384)) // 16 KB default
+        .route(
+            "/events",
+            post(handle_events).layer(DefaultBodyLimit::max(256 * 1024)),
+        );
 
     let port = config::daemon_port();
     let addr = format!("127.0.0.1:{}", port);
@@ -228,6 +247,126 @@ async fn handle_focus(Json(req): Json<FocusRequest>) -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
+async fn handle_events(
+    headers: HeaderMap,
+    body: axum::extract::Json<EventsBody>,
+) -> impl IntoResponse {
+    // Auth: X-Zestful-Token must match config::read_token().
+    let expected = config::read_token();
+    let got = headers
+        .get("x-zestful-token")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    match (expected, got) {
+        (Some(e), Some(g)) if e == g => {}
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid token"})),
+            )
+                .into_response();
+        }
+    }
+
+    // Normalize to a Vec<serde_json::Value>.
+    let envelopes: Vec<serde_json::Value> = match body.0 {
+        EventsBody::Single(v) => vec![v],
+        EventsBody::Batch { events } => events,
+    };
+
+    // Validate each envelope per spec §Daemon validation rules.
+    for (idx, env) in envelopes.iter().enumerate() {
+        if let Err(detail) = validate_envelope(env) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid envelope",
+                    "detail": detail,
+                    "event_index": idx,
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Accept. Log one line per event.
+    for env in &envelopes {
+        let type_ = env.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+        let id = env.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        let source = env.get("source").and_then(|v| v.as_str()).unwrap_or("?");
+        let session_id = env
+            .get("correlation")
+            .and_then(|c| c.get("session_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        crate::log::log(
+            "events",
+            &format!(
+                "accepted id={} type={} source={} session={}",
+                id, type_, source, session_id
+            ),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(EventsResponse {
+            status: "ok",
+            accepted: envelopes.len(),
+        }),
+    )
+        .into_response()
+}
+
+/// Validate an envelope JSON per spec §Daemon validation rules. Returns
+/// `Err(detail)` on failure. Payload shapes are NOT validated — unknown types
+/// are accepted for forward-compat.
+fn validate_envelope(v: &serde_json::Value) -> std::result::Result<(), String> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "envelope must be a JSON object".to_string())?;
+
+    // Required fields.
+    for required in [
+        "id",
+        "schema",
+        "ts",
+        "seq",
+        "host",
+        "os_user",
+        "device_id",
+        "source",
+        "source_pid",
+        "type",
+    ] {
+        if !obj.contains_key(required) {
+            return Err(format!("missing required field: {}", required));
+        }
+    }
+
+    // schema must be 1.
+    let schema = obj.get("schema").and_then(|v| v.as_u64()).unwrap_or(0);
+    if schema != 1 {
+        return Err(format!("unsupported schema version: {}", schema));
+    }
+
+    // id must be a 26-char string.
+    let id = obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "id must be a string".to_string())?;
+    if id.len() != 26 {
+        return Err(format!("id must be a 26-char ULID, got {} chars", id.len()));
+    }
+
+    // type must be a string.
+    if obj.get("type").and_then(|v| v.as_str()).is_none() {
+        return Err("type must be a string".into());
+    }
+
+    Ok(())
+}
+
 async fn shutdown_signal(pid_file: std::path::PathBuf) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -261,11 +400,53 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
+    use tempfile::TempDir;
+
+    /// Redirect `$HOME` (or `%USERPROFILE%` on Windows) to a tempdir for the
+    /// duration of a test, restoring on drop. Required so `set_test_token` /
+    /// `config::read_token` operate on an isolated filesystem and never touch
+    /// the real user's token file.
+    struct HomeGuard {
+        old_home: Option<String>,
+        _td: TempDir,
+    }
+
+    impl HomeGuard {
+        fn new() -> Self {
+            let td = TempDir::new().unwrap();
+            let home_var = if cfg!(target_os = "windows") {
+                "USERPROFILE"
+            } else {
+                "HOME"
+            };
+            let old_home = std::env::var(home_var).ok();
+            std::env::set_var(home_var, td.path());
+            HomeGuard { old_home, _td: td }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            let home_var = if cfg!(target_os = "windows") {
+                "USERPROFILE"
+            } else {
+                "HOME"
+            };
+            match &self.old_home {
+                Some(v) => std::env::set_var(home_var, v),
+                None => std::env::remove_var(home_var),
+            }
+        }
+    }
 
     fn app() -> Router {
         Router::new()
             .route("/health", get(health))
             .route("/focus", post(handle_focus))
+            .route(
+                "/events",
+                post(handle_events).layer(DefaultBodyLimit::max(256 * 1024)),
+            )
     }
 
     #[tokio::test]
@@ -450,5 +631,144 @@ mod tests {
         // The response is still 200 because the error is logged, not returned
         // But the osascript won't execute arbitrary code due to validation
         assert!(response.status().is_success() || response.status().is_client_error());
+    }
+
+    async fn send_events_request(body: &str, token: Option<&str>) -> axum::http::Response<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/events")
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("x-zestful-token", t);
+        }
+        let req = builder.body(Body::from(body.to_string())).unwrap();
+        app().oneshot(req).await.unwrap()
+    }
+
+    /// Set a known token for the duration of the test. Not thread-safe; run with
+    /// --test-threads=1 for the events tests.
+    fn set_test_token(token: &str) {
+        let dir = config::config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("local-token"), token).unwrap();
+    }
+
+    fn canned_envelope() -> serde_json::Value {
+        serde_json::json!({
+            "id": "01JGYK8F3N7WA9QVXR2PB5HM4D",
+            "schema": 1,
+            "ts": 1745183677234u64,
+            "seq": 0,
+            "host": "morrow.local",
+            "os_user": "jmorrow",
+            "device_id": "d_test",
+            "source": "claude-code",
+            "source_pid": 83421,
+            "type": "turn.completed",
+        })
+    }
+
+    #[tokio::test]
+    async fn events_rejects_missing_token() {
+        let _home = HomeGuard::new();
+        let body = serde_json::to_string(&canned_envelope()).unwrap();
+        let resp = send_events_request(&body, None).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn events_accepts_valid_single_envelope() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token-single");
+        let body = serde_json::to_string(&canned_envelope()).unwrap();
+        let resp = send_events_request(&body, Some("test-token-single")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["accepted"], 1);
+    }
+
+    #[tokio::test]
+    async fn events_accepts_batch() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token-batch");
+        let batch = serde_json::json!({
+            "events": [canned_envelope(), canned_envelope(), canned_envelope()],
+        });
+        let body = serde_json::to_string(&batch).unwrap();
+        let resp = send_events_request(&body, Some("test-token-batch")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["accepted"], 3);
+    }
+
+    #[tokio::test]
+    async fn events_rejects_missing_required_field() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token-required");
+        let mut env = canned_envelope();
+        env.as_object_mut().unwrap().remove("ts");
+        let body = serde_json::to_string(&env).unwrap();
+        let resp = send_events_request(&body, Some("test-token-required")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"], "invalid envelope");
+        assert!(json["detail"].as_str().unwrap().contains("ts"));
+    }
+
+    #[tokio::test]
+    async fn events_rejects_unsupported_schema_version() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token-schema");
+        let mut env = canned_envelope();
+        env["schema"] = serde_json::json!(99);
+        let body = serde_json::to_string(&env).unwrap();
+        let resp = send_events_request(&body, Some("test-token-schema")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json["detail"].as_str().unwrap().contains("schema"));
+    }
+
+    #[tokio::test]
+    async fn events_rejects_malformed_ulid() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token-ulid");
+        let mut env = canned_envelope();
+        env["id"] = serde_json::json!("short");
+        let body = serde_json::to_string(&env).unwrap();
+        let resp = send_events_request(&body, Some("test-token-ulid")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn events_accepts_unknown_type() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token-unknown");
+        let mut env = canned_envelope();
+        env["type"] = serde_json::json!("future.undefined_type");
+        let body = serde_json::to_string(&env).unwrap();
+        let resp = send_events_request(&body, Some("test-token-unknown")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn events_batch_all_or_nothing_reports_index() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token-index");
+        let mut bad = canned_envelope();
+        bad.as_object_mut().unwrap().remove("host");
+        let batch = serde_json::json!({
+            "events": [canned_envelope(), canned_envelope(), bad],
+        });
+        let body = serde_json::to_string(&batch).unwrap();
+        let resp = send_events_request(&body, Some("test-token-index")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["event_index"], 2);
     }
 }

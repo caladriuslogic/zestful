@@ -2,6 +2,11 @@
 
 All notable changes to the Zestful CLI will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Event protocol v1: `POST /events` on the Rust daemon (`127.0.0.1:21548`) accepts structured event envelopes from emitters. `zestful hook` now emits events for each incoming agent-hook payload in parallel with the legacy `/notify` call. No downstream consumers in v1 — ingestion-only, to begin populating the event corpus. See `docs/superpowers/specs/2026-04-21-event-protocol-design.md`.
+
 ## [3.1.0] - 2026-04-03
 
 ### Added
