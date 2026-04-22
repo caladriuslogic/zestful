@@ -273,19 +273,22 @@ fn correlation_from(payload: &Value) -> Option<Correlation> {
 
 /// Pick the most stable "workspace root" for this event.
 ///
-/// Claude Code's hook payload only carries the agent's *current* working
+/// Agent hook payloads often carry only the agent's *current* working
 /// directory (which moves when the agent `cd`s or reads files in subdirs).
 /// That's not what we want for `workspace_root` — we want the stable project
 /// root the session was started in. Resolution order:
 ///
-/// 1. `payload.workspace_roots[0]` — Cursor sends this directly.
-/// 2. `$CLAUDE_PROJECT_DIR` — set by Claude Code for hook subprocesses.
-/// 3. `cwd` — last resort; matches legacy behavior for unknown agents.
+/// 1. `payload.workspace_roots[0]` — Cursor sends this directly in its hook.
+/// 2. Agent-specific env var set when the session was started. See
+///    `workspace_root_env_vars_for` for the per-agent mapping.
+/// 3. `cwd` — last resort; matches legacy behavior when no better signal is
+///    available.
 fn resolve_workspace_root(
     agent: AgentKind,
     payload: &Value,
     cwd: Option<&str>,
 ) -> Option<String> {
+    // 1. Payload-provided workspace roots (Cursor).
     if let Some(root) = payload
         .get("workspace_roots")
         .and_then(|v| v.as_array())
@@ -294,14 +297,45 @@ fn resolve_workspace_root(
     {
         return Some(root.to_string());
     }
-    if agent == AgentKind::ClaudeCode {
-        if let Ok(v) = std::env::var("CLAUDE_PROJECT_DIR") {
+    // 2. Agent-specific env var lookup. First non-empty value wins.
+    for env_var in workspace_root_env_vars_for(agent) {
+        if let Ok(v) = std::env::var(env_var) {
             if !v.is_empty() {
                 return Some(v);
             }
         }
     }
+    // 3. cwd fallback.
     cwd.map(String::from)
+}
+
+/// Per-agent list of env vars that, when set, identify the stable project
+/// root the agent was started against. Checked in order; first non-empty
+/// value wins.
+///
+/// Verified conventions:
+/// - `CLAUDE_PROJECT_DIR` — Claude Code documents this for hook subprocesses.
+///   https://docs.anthropic.com/claude-code/hooks
+///
+/// Unverified / pending agents (currently fall through to `cwd`; add their
+/// env var here when the upstream convention is confirmed):
+/// - CodexCli: no documented project-dir env var at time of writing.
+///   Codex emits `cwd` in the hook payload; that's our only signal.
+/// - CopilotCli, Cline, Aider, GeminiCli: no known project-dir env var.
+/// - Cursor: provides `workspace_roots[]` directly in the payload, handled
+///   above — no env var lookup needed.
+/// - Generic: unknown agent, nothing to look up.
+fn workspace_root_env_vars_for(agent: AgentKind) -> &'static [&'static str] {
+    match agent {
+        AgentKind::ClaudeCode => &["CLAUDE_PROJECT_DIR"],
+        AgentKind::CodexCli
+        | AgentKind::CopilotCli
+        | AgentKind::Cline
+        | AgentKind::Aider
+        | AgentKind::Cursor
+        | AgentKind::GeminiCli
+        | AgentKind::Generic => &[],
+    }
 }
 
 fn context_from(agent: AgentKind, payload: &Value) -> Option<Context> {
@@ -673,5 +707,20 @@ mod tests {
             }
         }
         assert_eq!(root.as_deref(), Some("/codex/cwd"));
+    }
+
+    #[test]
+    fn workspace_root_env_vars_mapping_is_stable() {
+        // Claude Code is the only agent with a documented project-dir env var
+        // today; other agents either provide the root via payload (Cursor) or
+        // have no known env var (everyone else). This test pins that policy.
+        assert_eq!(workspace_root_env_vars_for(AgentKind::ClaudeCode), &["CLAUDE_PROJECT_DIR"]);
+        assert!(workspace_root_env_vars_for(AgentKind::Cursor).is_empty());
+        assert!(workspace_root_env_vars_for(AgentKind::CodexCli).is_empty());
+        assert!(workspace_root_env_vars_for(AgentKind::CopilotCli).is_empty());
+        assert!(workspace_root_env_vars_for(AgentKind::Cline).is_empty());
+        assert!(workspace_root_env_vars_for(AgentKind::Aider).is_empty());
+        assert!(workspace_root_env_vars_for(AgentKind::GeminiCli).is_empty());
+        assert!(workspace_root_env_vars_for(AgentKind::Generic).is_empty());
     }
 }
