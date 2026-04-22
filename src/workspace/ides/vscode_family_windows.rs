@@ -192,17 +192,15 @@ fn focus_sync(family: Family, project_id: Option<&str>) -> Result<()> {
     let cli = family.cli_name();
     if let Some(id) = project_id {
         if let Some(path) = lookup_project_path(family, id) {
-            // Run the CLI via cmd.exe so that .cmd wrappers (e.g. cursor.cmd)
-            // are resolved correctly. --reuse-window signals the already-running
-            // instance via IPC to focus the matching window — no new window opens.
+            // Spawn without waiting — the .cmd wrapper sends IPC to the running
+            // instance and exits on its own; blocking on it just adds latency.
             let _ = Command::new("cmd")
                 .args(["/c", cli, "--reuse-window", &path])
-                .status();
+                .spawn();
             return Ok(());
         }
     }
-    // No project id or unresolved: focus the editor without opening a specific path.
-    let _ = Command::new("cmd").args(["/c", cli]).status();
+    let _ = Command::new("cmd").args(["/c", cli]).spawn();
     Ok(())
 }
 
