@@ -91,7 +91,8 @@ mod tests {
                 "HOME"
             };
             let old_home = std::env::var(home_var).ok();
-            std::env::set_var(home_var, td.path());
+            // SAFETY: tests run single-threaded via --test-threads=1.
+            unsafe { std::env::set_var(home_var, td.path()); }
             let p = td.path().to_path_buf();
             (
                 HomeGuard {
@@ -110,9 +111,12 @@ mod tests {
             } else {
                 "HOME"
             };
-            match &self.old_home {
-                Some(v) => std::env::set_var(home_var, v),
-                None => std::env::remove_var(home_var),
+            // SAFETY: tests run single-threaded via --test-threads=1.
+            unsafe {
+                match &self.old_home {
+                    Some(v) => std::env::set_var(home_var, v),
+                    None => std::env::remove_var(home_var),
+                }
             }
         }
     }

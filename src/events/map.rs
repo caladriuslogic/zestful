@@ -601,10 +601,14 @@ mod tests {
 
     // Tests below depend on `CLAUDE_PROJECT_DIR` env var state and so must
     // run single-threaded (already enforced crate-wide via --test-threads=1).
+    // Tests mutating CLAUDE_PROJECT_DIR rely on --test-threads=1 for isolation.
+    // SAFETY on each set_var/remove_var: single-threaded test mode means no
+    // other thread is reading env vars during the mutation.
+
     #[test]
     fn resolve_workspace_root_prefers_env_var_for_claude_code() {
         let prior = std::env::var("CLAUDE_PROJECT_DIR").ok();
-        std::env::set_var("CLAUDE_PROJECT_DIR", "/Users/test/project-root");
+        unsafe { std::env::set_var("CLAUDE_PROJECT_DIR", "/Users/test/project-root"); }
         let payload = json!({ "hook_event_name": "PreToolUse", "cwd": "/Users/test/project-root/sub/dir" });
         let root = resolve_workspace_root(
             AgentKind::ClaudeCode,
@@ -612,9 +616,11 @@ mod tests {
             Some("/Users/test/project-root/sub/dir"),
         );
         // Restore env before asserting so a failure doesn't leak state.
-        match prior {
-            Some(v) => std::env::set_var("CLAUDE_PROJECT_DIR", v),
-            None => std::env::remove_var("CLAUDE_PROJECT_DIR"),
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("CLAUDE_PROJECT_DIR", v),
+                None => std::env::remove_var("CLAUDE_PROJECT_DIR"),
+            }
         }
         assert_eq!(root.as_deref(), Some("/Users/test/project-root"));
     }
@@ -622,30 +628,34 @@ mod tests {
     #[test]
     fn resolve_workspace_root_falls_back_to_cwd_when_env_unset() {
         let prior = std::env::var("CLAUDE_PROJECT_DIR").ok();
-        std::env::remove_var("CLAUDE_PROJECT_DIR");
+        unsafe { std::env::remove_var("CLAUDE_PROJECT_DIR"); }
         let payload = json!({ "hook_event_name": "PreToolUse", "cwd": "/tmp/nowhere" });
         let root = resolve_workspace_root(
             AgentKind::ClaudeCode,
             &payload,
             Some("/tmp/nowhere"),
         );
-        if let Some(v) = prior { std::env::set_var("CLAUDE_PROJECT_DIR", v); }
+        if let Some(v) = prior {
+            unsafe { std::env::set_var("CLAUDE_PROJECT_DIR", v); }
+        }
         assert_eq!(root.as_deref(), Some("/tmp/nowhere"));
     }
 
     #[test]
     fn resolve_workspace_root_prefers_payload_roots_over_env() {
         let prior = std::env::var("CLAUDE_PROJECT_DIR").ok();
-        std::env::set_var("CLAUDE_PROJECT_DIR", "/should-not-win");
+        unsafe { std::env::set_var("CLAUDE_PROJECT_DIR", "/should-not-win"); }
         let payload = json!({
             "hook_event_name": "beforeSubmitPrompt",
             "workspace_roots": ["/cursor/says/this"],
             "cwd": "/whatever",
         });
         let root = resolve_workspace_root(AgentKind::Cursor, &payload, Some("/whatever"));
-        match prior {
-            Some(v) => std::env::set_var("CLAUDE_PROJECT_DIR", v),
-            None => std::env::remove_var("CLAUDE_PROJECT_DIR"),
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("CLAUDE_PROJECT_DIR", v),
+                None => std::env::remove_var("CLAUDE_PROJECT_DIR"),
+            }
         }
         assert_eq!(root.as_deref(), Some("/cursor/says/this"));
     }
@@ -653,12 +663,14 @@ mod tests {
     #[test]
     fn resolve_workspace_root_ignores_env_for_non_claude_agents() {
         let prior = std::env::var("CLAUDE_PROJECT_DIR").ok();
-        std::env::set_var("CLAUDE_PROJECT_DIR", "/claude-project-root");
+        unsafe { std::env::set_var("CLAUDE_PROJECT_DIR", "/claude-project-root"); }
         let payload = json!({ "hook_event_name": "SessionStart", "cwd": "/codex/cwd" });
         let root = resolve_workspace_root(AgentKind::CodexCli, &payload, Some("/codex/cwd"));
-        match prior {
-            Some(v) => std::env::set_var("CLAUDE_PROJECT_DIR", v),
-            None => std::env::remove_var("CLAUDE_PROJECT_DIR"),
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("CLAUDE_PROJECT_DIR", v),
+                None => std::env::remove_var("CLAUDE_PROJECT_DIR"),
+            }
         }
         assert_eq!(root.as_deref(), Some("/codex/cwd"));
     }
