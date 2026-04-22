@@ -1,17 +1,18 @@
 //! Detection for VS Code and its forks on Windows.
 //!
-//! Strategy: check for a running process via `tasklist`, then identify
-//! currently open workspaces by comparing `state.vscdb` modification time
-//! against the process start time. VS Code writes to this file when a
-//! workspace is opened, so entries modified after Code.exe started are live.
-//! Process start time is obtained via PowerShell `Get-Process`.
+//! Strategy: check for a running process via `tasklist`, then read
+//! `%APPDATA%\<App>\User\globalStorage\storage.json` which VS Code-family
+//! editors keep updated with the currently-open window list under the
+//! `windowsState` key. This is the most reliable detection method on Windows
+//! as it does not depend on file-lock inspection or modification times.
 
 use anyhow::Result;
 use serde::Deserialize;
+use serde_json::Value;
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::workspace::types::{IdeInstance, IdeProject};
 
@@ -83,21 +84,13 @@ pub fn detect_all() -> Result<Vec<IdeInstance>> {
 
 fn detect_one(spec: &AppSpec) -> Option<IdeInstance> {
     let pid = tasklist_pid(spec.process_name)?;
-    let storage_root = appdata_dir()?
+    let storage_json = appdata_dir()?
         .join(spec.appdata_dir)
         .join("User")
-        .join("workspaceStorage");
+        .join("globalStorage")
+        .join("storage.json");
 
-    // Get the earliest start time of this process family so we can filter
-    // workspace storage entries to those modified during the current session.
-    let process_name_no_ext = spec.process_name.trim_end_matches(".exe");
-    let session_start = process_start_time_unix(process_name_no_ext);
-
-    let open_dirs = active_workspace_dirs(&storage_root, session_start);
-    let projects: Vec<IdeProject> = open_dirs
-        .iter()
-        .filter_map(|dir| read_workspace_project(dir))
-        .collect();
+    let projects = read_open_projects(&storage_json);
 
     Some(IdeInstance {
         app: spec.display.to_string(),
@@ -106,82 +99,71 @@ fn detect_one(spec: &AppSpec) -> Option<IdeInstance> {
     })
 }
 
-/// Return workspace storage dirs whose `state.vscdb` was modified at or after
-/// `session_start_secs` (Unix timestamp). If the process start time could not
-/// be determined, falls back to entries modified within the last 24 hours.
-fn active_workspace_dirs(storage_root: &PathBuf, session_start_secs: Option<u64>) -> Vec<PathBuf> {
-    let cutoff = match session_start_secs {
-        Some(t) => UNIX_EPOCH + Duration::from_secs(t),
-        None => SystemTime::now() - Duration::from_secs(86400),
-    };
-
-    let entries = match fs::read_dir(storage_root) {
-        Ok(e) => e,
+/// Parse the currently-open window folders from VS Code's `storage.json`.
+///
+/// The file contains a `windowsState` object with `lastActiveWindow` and
+/// `openedWindows` entries, each optionally carrying a `folder` URI.
+fn read_open_projects(storage_json: &PathBuf) -> Vec<IdeProject> {
+    let contents = match fs::read_to_string(storage_json) {
+        Ok(c) => c,
         Err(_) => return vec![],
     };
+    let root: Value = match serde_json::from_str(&contents) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let Some(ws) = root.get("windowsState") else {
+        return vec![];
+    };
 
-    let mut dirs = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
+    let mut projects: Vec<IdeProject> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    // lastActiveWindow comes first so it gets active=true below
+    let last_active_folder = ws
+        .get("lastActiveWindow")
+        .and_then(|w| window_folder(w));
+
+    let mut add = |folder: String, active: bool| {
+        if seen.insert(folder.clone()) {
+            let name = PathBuf::from(&folder)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !name.is_empty() {
+                projects.push(IdeProject {
+                    name,
+                    uri: None,
+                    path: folder,
+                    active,
+                });
+            }
         }
-        let db = path.join("state.vscdb");
-        let modified = fs::metadata(&db)
-            .and_then(|m| m.modified())
-            .unwrap_or(UNIX_EPOCH);
-        if modified >= cutoff {
-            dirs.push(path);
+    };
+
+    if let Some(f) = last_active_folder.clone() {
+        add(f, true);
+    }
+    if let Some(opened) = ws.get("openedWindows").and_then(|w| w.as_array()) {
+        for win in opened {
+            if let Some(f) = window_folder(win) {
+                let is_active = last_active_folder.as_deref() == Some(&f);
+                add(f, is_active);
+            }
         }
     }
-    dirs
+
+    projects
 }
 
-/// Return the earliest start time of any running process with the given name
-/// as a Unix timestamp (seconds), using PowerShell `Get-Process`.
-fn process_start_time_unix(name: &str) -> Option<u64> {
-    let script = format!(
-        "$p = Get-Process -Name '{}' -ErrorAction SilentlyContinue | \
-         Sort-Object StartTime | Select-Object -First 1; \
-         if ($p) {{ [int64](($p.StartTime.ToUniversalTime() - \
-         [datetime]'1970-01-01').TotalSeconds) }}",
-        name
-    );
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .ok()
-}
-
-#[derive(Deserialize)]
-struct WorkspaceFile {
-    folder: Option<String>,
-    workspace: Option<String>,
-}
-
-fn read_workspace_project(dir: &PathBuf) -> Option<IdeProject> {
-    let path = dir.join("workspace.json");
-    let contents = fs::read_to_string(&path).ok()?;
-    let parsed: WorkspaceFile = serde_json::from_str(&contents).ok()?;
-    let uri = parsed.folder.or(parsed.workspace)?;
-    let decoded = decode_vscode_uri(&uri);
-    let name = PathBuf::from(&decoded)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    if name.is_empty() {
-        return None;
+fn window_folder(win: &Value) -> Option<String> {
+    let uri = win.get("folder")?.as_str()?;
+    let decoded = decode_vscode_uri(uri);
+    if decoded.is_empty() {
+        None
+    } else {
+        Some(decoded)
     }
-    Some(IdeProject {
-        name,
-        uri: None,
-        path: decoded,
-        active: false,
-    })
 }
 
 /// Open a URI in the Zestful VS Code extension's URI handler (for terminal focus).
@@ -229,6 +211,12 @@ fn focus_sync(family: Family, project_id: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct WorkspaceFile {
+    folder: Option<String>,
+    workspace: Option<String>,
+}
+
 fn lookup_project_path(family: Family, project_name: &str) -> Option<String> {
     let storage = appdata_dir()?
         .join(family.appdata_dir())
@@ -259,16 +247,6 @@ fn lookup_project_path(family: Family, project_name: &str) -> Option<String> {
     None
 }
 
-/// Parse a VS Code `file://` URI into a local filesystem path.
-/// Windows URIs look like `file:///C%3A/path` or `file:///C:/path`.
-fn decode_vscode_uri(uri: &str) -> String {
-    let local = uri
-        .strip_prefix("file:///")
-        .or_else(|| uri.strip_prefix("file://"))
-        .unwrap_or(uri);
-    urlencoding_decode(local)
-}
-
 /// Find the PID of the first process matching `exe_name` via `tasklist`.
 fn tasklist_pid(exe_name: &str) -> Option<u32> {
     let output = Command::new("tasklist")
@@ -293,6 +271,16 @@ fn tasklist_pid(exe_name: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// Parse a VS Code `file://` URI into a local filesystem path.
+/// Windows URIs look like `file:///C%3A/path` or `file:///C:/path`.
+fn decode_vscode_uri(uri: &str) -> String {
+    let local = uri
+        .strip_prefix("file:///")
+        .or_else(|| uri.strip_prefix("file://"))
+        .unwrap_or(uri);
+    urlencoding_decode(local)
 }
 
 fn appdata_dir() -> Option<PathBuf> {
