@@ -734,14 +734,21 @@ mod tests {
 
         let payload = serde_json::json!({ "cwd": "/whatever" });
         let ctx = context_from(AgentKind::ClaudeCode, &payload).expect("expected Some(ctx)");
-        let env = ctx.env_vars_observed.expect("expected Some(map)");
-        assert_eq!(env.get("CLAUDE_PROJECT_DIR").map(String::as_str), Some("/x/env-vars-test"));
+        let observed_value = ctx
+            .env_vars_observed
+            .as_ref()
+            .and_then(|m| m.get("CLAUDE_PROJECT_DIR"))
+            .map(String::as_str)
+            .map(String::from);
 
+        // Restore before asserting so a failed assert doesn't leak env state.
         unsafe {
             match prior {
                 Some(v) => std::env::set_var("CLAUDE_PROJECT_DIR", v),
                 None    => std::env::remove_var("CLAUDE_PROJECT_DIR"),
             }
         }
+
+        assert_eq!(observed_value.as_deref(), Some("/x/env-vars-test"));
     }
 }
