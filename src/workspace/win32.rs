@@ -14,7 +14,8 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 use windows_sys::Win32::System::Threading::{AttachThreadInput, OpenProcess, PROCESS_SYNCHRONIZE};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GetClassNameW, GetForegroundWindow, GetParent, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, PostMessageW, SC_RESTORE,
+    SetForegroundWindow, ShowWindow, SW_RESTORE, WM_SYSCOMMAND,
 };
 
 /// Snapshot all running processes.
@@ -203,17 +204,24 @@ pub fn focus_by_pid(pid: u32) {
 /// Uses AttachThreadInput to bypass the Windows 11 foreground lock.
 pub fn raise_window(hwnd: HWND) {
     unsafe {
-        ShowWindow(hwnd, SW_RESTORE);
         let fg = GetForegroundWindow();
         let mut dummy: u32 = 0;
         let fg_thread = GetWindowThreadProcessId(fg, &mut dummy);
         let tgt_thread = GetWindowThreadProcessId(hwnd, &mut dummy);
-        if fg_thread != tgt_thread {
+        let threads_differ = fg_thread != tgt_thread && fg_thread != 0;
+        if threads_differ {
             AttachThreadInput(fg_thread, tgt_thread, TRUE);
+        }
+        ShowWindow(hwnd, SW_RESTORE);
+        // ShowWindow can silently fail on elevated (admin) windows when called from a
+        // non-elevated process. WM_SYSCOMMAND/SC_RESTORE is not in the UIPI block list,
+        // so PostMessageW succeeds where ShowWindow's internal message dispatch does not.
+        if IsIconic(hwnd) != FALSE {
+            PostMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE as usize, 0);
         }
         SetForegroundWindow(hwnd);
         BringWindowToTop(hwnd);
-        if fg_thread != tgt_thread {
+        if threads_differ {
             AttachThreadInput(fg_thread, tgt_thread, FALSE);
         }
     }
@@ -254,6 +262,7 @@ fn find_visible_window(pids: &HashSet<u32>) -> HWND {
 struct CollectState {
     pids: *const HashSet<u32>,
     seen: HashMap<u32, String>,
+    pseudo_pids: HashSet<u32>,
 }
 
 unsafe extern "system" fn collect_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -268,9 +277,10 @@ unsafe extern "system" fn collect_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let cls_str = wcs_to_string(&cls);
 
     // PseudoConsoleWindow is invisible but indicates a WT-hosted interactive console.
-    // Include it with an empty title so detection works for shells inside Windows Terminal.
+    // Track it separately so it doesn't shadow a visible titled window for the same PID
+    // (conhost.exe on modern Windows can own both).
     if cls_str == "PseudoConsoleWindow" {
-        state.seen.insert(pid, String::new());
+        state.pseudo_pids.insert(pid);
         return TRUE;
     }
     if IsWindowVisible(hwnd) == FALSE {
@@ -331,9 +341,15 @@ fn collect_windows_for_pids(pids: &HashSet<u32>) -> Vec<(u32, String)> {
     let mut state = CollectState {
         pids: pids as *const _,
         seen: HashMap::new(),
+        pseudo_pids: HashSet::new(),
     };
     unsafe {
         EnumWindows(Some(collect_cb), &mut state as *mut _ as LPARAM);
+    }
+    // PIDs only reachable via PseudoConsoleWindow (WT-hosted, no visible window of their own)
+    // get an empty title so they still appear in the result set.
+    for pid in state.pseudo_pids {
+        state.seen.entry(pid).or_insert_with(String::new);
     }
     state.seen.into_iter().collect()
 }
