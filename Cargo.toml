@@ -28,4 +28,5 @@ windows-sys = { version = "0.52", features = [
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
+serial_test = "3"
 

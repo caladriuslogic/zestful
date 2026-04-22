@@ -6,6 +6,7 @@
 
 pub mod backend_forwarder;
 pub mod device;
+pub mod env_capture;
 pub mod envelope;
 pub mod map;
 pub mod payload;
