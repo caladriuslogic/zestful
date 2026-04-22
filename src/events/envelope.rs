@@ -1,6 +1,7 @@
 //! Event envelope types per docs/superpowers/specs/2026-04-21-event-protocol-design.md §Envelope.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Envelope {
@@ -66,6 +67,8 @@ pub struct Context {
     pub cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub focus_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub env_vars_observed: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

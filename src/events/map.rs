@@ -5,6 +5,7 @@
 //! docs/superpowers/specs/2026-04-21-event-protocol-design.md §Mapping.
 
 use crate::events::device;
+use crate::events::env_capture;
 use crate::events::envelope::{Context, Correlation, Envelope, Subapplication};
 use crate::events::payload::{
     AgentNotified, Payload, PermissionRequested, SessionStarted, ToolCompleted, ToolInvoked,
@@ -391,6 +392,7 @@ fn context_from(agent: AgentKind, payload: &Value) -> Option<Context> {
         cwd,
         workspace_root,
         project,
+        env_vars_observed: env_capture::capture(),
         ..Default::default()
     };
     Some(ctx)
@@ -722,5 +724,24 @@ mod tests {
         assert!(workspace_root_env_vars_for(AgentKind::Aider).is_empty());
         assert!(workspace_root_env_vars_for(AgentKind::GeminiCli).is_empty());
         assert!(workspace_root_env_vars_for(AgentKind::Generic).is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn context_includes_env_vars_observed_when_set() {
+        let prior = std::env::var("CLAUDE_PROJECT_DIR").ok();
+        unsafe { std::env::set_var("CLAUDE_PROJECT_DIR", "/x/env-vars-test"); }
+
+        let payload = serde_json::json!({ "cwd": "/whatever" });
+        let ctx = context_from(AgentKind::ClaudeCode, &payload).expect("expected Some(ctx)");
+        let env = ctx.env_vars_observed.expect("expected Some(map)");
+        assert_eq!(env.get("CLAUDE_PROJECT_DIR").map(String::as_str), Some("/x/env-vars-test"));
+
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("CLAUDE_PROJECT_DIR", v),
+                None    => std::env::remove_var("CLAUDE_PROJECT_DIR"),
+            }
+        }
     }
 }
