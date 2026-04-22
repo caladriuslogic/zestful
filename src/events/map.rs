@@ -293,12 +293,38 @@ fn context_from(agent: AgentKind, payload: &Value) -> Option<Context> {
             .map(|f| f.to_string_lossy().into_owned())
     });
     let sub = tmux_subapplication();
+
+    // focus_uri: the `workspace://...` URI for click-to-focus. Same call
+    // `cmd/hook.rs` already uses for the legacy /notify path.
+    let focus_uri = crate::workspace::locate().ok();
+
+    // application + application_instance: parsed out of the focus_uri.
+    // e.g. workspace://iterm2/window:1/tab:2  →  app="iterm2", instance="window:1/tab:2"
+    let (application, application_instance) = focus_uri
+        .as_deref()
+        .and_then(crate::workspace::uri::parse_terminal_uri)
+        .map(|p| {
+            let mut parts = Vec::with_capacity(2);
+            if let Some(w) = p.window_id.as_deref() {
+                parts.push(format!("window:{}", w));
+            }
+            if let Some(t) = p.tab_id.as_deref() {
+                parts.push(format!("tab:{}", t));
+            }
+            let instance = if parts.is_empty() { None } else { Some(parts.join("/")) };
+            (Some(p.app), instance)
+        })
+        .unwrap_or((None, None));
+
     let ctx = Context {
         agent: Some(agent.slug().to_string()),
         model: payload
             .get("model")
             .and_then(|v| v.as_str())
             .map(String::from),
+        application,
+        application_instance,
+        focus_uri,
         shell,
         subapplication: sub,
         cwd,
