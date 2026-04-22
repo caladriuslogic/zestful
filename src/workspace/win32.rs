@@ -149,8 +149,15 @@ pub fn focus_by_pid(pid: u32) {
         }
     }
 
-    // Strategy 1.
+    // Strategy 1a: direct visible window or conhost.exe child.
     let mut hwnd = find_visible_window(&candidate_pids);
+
+    // Strategy 1b: PseudoConsoleWindow (WT-hosted process) → raise the WT frame.
+    // PseudoConsoleWindow is not visible, so Strategy 1a misses it. Its Win32 parent
+    // (GetParent) is the CASCADIA_HOSTING_WINDOW_CLASS frame that can be raised.
+    if hwnd == 0 {
+        hwnd = find_wt_frame_for_pids(&candidate_pids);
+    }
 
     // Strategy 2: walk parent chain.
     if hwnd == 0 {
@@ -251,18 +258,26 @@ struct CollectState {
 
 unsafe extern "system" fn collect_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let state = &mut *(lparam as *mut CollectState);
-    if IsWindowVisible(hwnd) == FALSE {
-        return TRUE;
-    }
     let mut pid: u32 = 0;
     GetWindowThreadProcessId(hwnd, &mut pid);
     if !(*state.pids).contains(&pid) || state.seen.contains_key(&pid) {
         return TRUE;
     }
-    // Skip COM message-only windows.
     let mut cls = [0u16; 128];
     GetClassNameW(hwnd, cls.as_mut_ptr(), cls.len() as i32);
-    if wcs_to_string(&cls) == "OleMainThreadWndName" {
+    let cls_str = wcs_to_string(&cls);
+
+    // PseudoConsoleWindow is invisible but indicates a WT-hosted interactive console.
+    // Include it with an empty title so detection works for shells inside Windows Terminal.
+    if cls_str == "PseudoConsoleWindow" {
+        state.seen.insert(pid, String::new());
+        return TRUE;
+    }
+    if IsWindowVisible(hwnd) == FALSE {
+        return TRUE;
+    }
+    // Skip COM message-only windows.
+    if cls_str == "OleMainThreadWndName" {
         return TRUE;
     }
     let mut buf = [0u16; 512];
@@ -273,6 +288,43 @@ unsafe extern "system" fn collect_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let title = String::from_utf16_lossy(&buf[..len as usize]);
     state.seen.insert(pid, title);
     TRUE
+}
+
+/// For processes running inside Windows Terminal, find the WT frame window (CASCADIA_HOSTING_WINDOW_CLASS)
+/// by locating the PseudoConsoleWindow whose GetWindowThreadProcessId matches one of the given PIDs,
+/// then returning that window's Win32 parent (the WT frame).
+fn find_wt_frame_for_pids(pids: &HashSet<u32>) -> HWND {
+    struct State {
+        pids: *const HashSet<u32>,
+        result: HWND,
+    }
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let state = &mut *(lparam as *mut State);
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if !(*state.pids).contains(&pid) {
+            return TRUE;
+        }
+        let mut cls = [0u16; 64];
+        GetClassNameW(hwnd, cls.as_mut_ptr(), cls.len() as i32);
+        if wcs_to_string(&cls) != "PseudoConsoleWindow" {
+            return TRUE;
+        }
+        let parent = GetParent(hwnd);
+        if parent != 0 {
+            state.result = parent;
+            return FALSE; // stop enumeration
+        }
+        TRUE
+    }
+    let mut state = State {
+        pids: pids as *const _,
+        result: 0,
+    };
+    unsafe {
+        EnumWindows(Some(cb), &mut state as *mut _ as LPARAM);
+    }
+    state.result
 }
 
 fn collect_windows_for_pids(pids: &HashSet<u32>) -> Vec<(u32, String)> {
