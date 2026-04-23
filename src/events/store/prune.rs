@@ -4,8 +4,12 @@
 use rusqlite::Connection;
 
 /// Check DB size; if over `max_bytes`, delete oldest rows to get back
-/// under cap + 10% overshoot, then run incremental_vacuum to reclaim
-/// disk. No-op when `max_bytes == 0` (unbounded) or when already under.
+/// under 90% of cap, then run VACUUM to reclaim disk. No-op when
+/// `max_bytes == 0` (unbounded) or when the store is already under cap.
+///
+/// VACUUM (rather than incremental_vacuum) is used because the current
+/// init() PRAGMA order locks auto_vacuum=NONE on a fresh WAL database.
+/// See the inline note at the VACUUM call for details.
 pub fn check_and_enforce(conn: &Connection, max_bytes: u64) -> rusqlite::Result<PruneOutcome> {
     if max_bytes == 0 {
         return Ok(PruneOutcome::Skipped);
@@ -72,6 +76,11 @@ mod tests {
     fn open_on_disk() -> (NamedTempFile, Connection) {
         let f = NamedTempFile::new().unwrap();
         let conn = Connection::open(f.path()).unwrap();
+        // Intentionally mirrors production init()'s PRAGMA order (journal_mode
+        // first). The auto_vacuum=INCREMENTAL is silently ignored by SQLite
+        // because WAL already wrote pages — see prune.rs's VACUUM note.
+        // Production init() should be reordered as a follow-up; when that
+        // happens, swap these two lines too.
         conn.pragma_update(None, "journal_mode", "WAL").unwrap();
         conn.pragma_update(None, "auto_vacuum", "INCREMENTAL").unwrap();
         run_migrations(&conn).unwrap();
@@ -148,5 +157,26 @@ mod tests {
             .unwrap();
         assert!(min_id > 1, "oldest row should have been evicted, min_id = {}", min_id);
         assert_eq!(max_id, 30);
+    }
+
+    #[test]
+    fn prune_deletes_solo_row_when_over_cap() {
+        // When there's exactly one row and it's over cap, the .max(1) clamp
+        // ensures we delete it rather than silently doing nothing. Without the
+        // clamp, integer division could compute rows_to_drop = 0.
+        let (_f, conn) = open_on_disk();
+        insert(&conn, &fixture("only", 500)).unwrap();  // 500 KB single row
+        let cap = 200 * 1024;  // 200 KB cap, well below the row size
+        let out = check_and_enforce(&conn, cap).unwrap();
+        match out {
+            PruneOutcome::Pruned { rows_deleted, .. } => {
+                assert_eq!(rows_deleted, 1);
+            }
+            other => panic!("expected Pruned, got {:?}", other),
+        }
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
