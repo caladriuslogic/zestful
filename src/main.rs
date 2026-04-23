@@ -118,6 +118,12 @@ enum Commands {
         #[arg(long)]
         agent: Option<String>,
     },
+
+    /// Query the local event store. Subcommands: list, tail, count.
+    Events {
+        #[command(subcommand)]
+        command: cmd::events::EventsCommand,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -131,6 +137,7 @@ fn main() -> anyhow::Result<()> {
             | Commands::Focus { .. }
             | Commands::TestFocus { .. }
             | Commands::Hook { .. }
+            | Commands::Events { .. }
     ) {
         config::ensure_daemon();
     }
@@ -163,5 +170,7 @@ fn main() -> anyhow::Result<()> {
         Commands::TestFocus { app } => cmd::test_focus::run(Some(app)),
 
         Commands::Hook { agent } => cmd::hook::run(agent),
+
+        Commands::Events { command } => cmd::events::run(command),
     }
 }
