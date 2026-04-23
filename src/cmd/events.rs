@@ -36,6 +36,8 @@ pub enum EventsCommand {
         #[arg(long, value_name = "TYPE")]
         event_type: Option<String>,
         /// Starting row count (most recent N events shown on first iter).
+        /// Use `--initial 0` to start with no backlog and only show events
+        /// that arrive after the command starts.
         #[arg(long, default_value_t = 20)]
         initial: usize,
     },
@@ -57,8 +59,11 @@ pub enum EventsCommand {
 }
 
 pub fn run(command: EventsCommand) -> anyhow::Result<()> {
-    // The CLI is a separate process from the daemon. Open the event store
-    // directly — init() is idempotent-per-process and sets the right PRAGMAs.
+    // The CLI is a separate process from the daemon. Each CLI invocation
+    // is a fresh process, so calling store::init() here is always the
+    // first (and only) call on the OnceLock — safe. The init call opens
+    // the existing DB, sets PRAGMAs (including WAL so we can read while
+    // the daemon writes), and runs any pending migrations.
     let db_path = crate::config::config_dir().join("events.db");
     if !db_path.exists() {
         anyhow::bail!(
@@ -117,26 +122,48 @@ fn run_list(
     Ok(())
 }
 
+/// Tail the event stream. Polls the store every 500 ms for rows newer
+/// than `last_seen_received_at`. The per-poll fetch caps at 10_000 rows
+/// (TAIL_POLL_LIMIT); bursts exceeding that rate may drop older rows in
+/// the burst — a stderr warning prints when the cap is hit.
+///
+/// This is a monitoring and debugging tool; for loss-free historical
+/// queries use `zestful events list` with explicit `--since` / `--until`.
 fn run_tail(
     source: Option<String>,
     event_type: Option<String>,
     initial: usize,
 ) -> anyhow::Result<()> {
-    // Print the most recent `initial` rows on startup.
-    let seed_filters = crate::events::store::query::ListFilters {
-        source: source.clone(),
-        event_type: event_type.clone(),
-        ..Default::default()
-    };
-    let mut last_seen_received_at: i64 = {
+    // Per-poll cap. Realistic agent event streams are well below this
+    // rate; at 500ms intervals this covers 20_000 events/sec. If we ever
+    // hit the cap a warning prints so operators know events may have been
+    // missed.
+    const TAIL_POLL_LIMIT: usize = 10_000;
+
+    let mut last_seen_received_at: i64 = if initial == 0 {
+        // "No backlog, only new events." Start the watermark at the current
+        // newest row so the first poll returns only events that arrive after
+        // this call.
+        let c = crate::events::store::conn().lock().unwrap();
+        c.query_row(
+            "SELECT COALESCE(MAX(received_at), 0) FROM events",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?
+    } else {
+        let seed_filters = crate::events::store::query::ListFilters {
+            source: source.clone(),
+            event_type: event_type.clone(),
+            ..Default::default()
+        };
         let c = crate::events::store::conn().lock().unwrap();
         let (rows, _) = crate::events::store::query::list(&c, &seed_filters, initial, None)?;
-        // Rows are newest-first; reverse so tail shows oldest of the seed
-        // first, newest last (matches what interactive tail-ers expect).
         for r in rows.iter().rev() {
             print_tail_line(r);
         }
-        rows.iter().map(|r| r.received_at).max().unwrap_or(0)
+        // list() returns DESC, so the newest row is rows[0] — first() is
+        // O(1) and expresses the ordering assumption explicitly.
+        rows.first().map(|r| r.received_at).unwrap_or(0)
     };
 
     loop {
@@ -149,9 +176,15 @@ fn run_tail(
         };
         let rows = {
             let c = crate::events::store::conn().lock().unwrap();
-            let (rows, _) = crate::events::store::query::list(&c, &poll_filters, 500, None)?;
+            let (rows, _) = crate::events::store::query::list(&c, &poll_filters, TAIL_POLL_LIMIT, None)?;
             rows
         };
+        if rows.len() == TAIL_POLL_LIMIT {
+            eprintln!(
+                "warning: tail hit {} per-poll cap; older events in this burst may have been missed",
+                TAIL_POLL_LIMIT
+            );
+        }
         for r in rows.iter().rev() {
             print_tail_line(r);
             if r.received_at > last_seen_received_at {
@@ -190,7 +223,11 @@ fn print_tail_line(r: &crate::events::store::query::EventRow) {
 }
 
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n { s.to_string() } else { format!("{}…", &s[..n.saturating_sub(1)]) }
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(n.saturating_sub(1)).collect();
+    format!("{}…", cut)
 }
 
 #[cfg(test)]
@@ -244,5 +281,11 @@ mod tests {
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("exactly10c", 10), "exactly10c");
         assert_eq!(truncate("this-is-way-too-long", 10), "this-is-w…");
+
+        // Multi-byte UTF-8: each char is 3 bytes, count by chars not bytes.
+        // 5 chars total, n=10 → no truncation. No panic at byte boundary.
+        assert_eq!(truncate("日本語テスト", 10), "日本語テスト");
+        // 5 chars, n=3 → take 2 + ellipsis.
+        assert_eq!(truncate("日本語テスト", 3), "日本…");
     }
 }
