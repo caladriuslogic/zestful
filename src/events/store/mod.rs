@@ -3,7 +3,8 @@
 //! CLI read through the `query` submodule.
 
 pub mod schema;
-// Submodules added in later tasks: write, query, prune.
+pub mod write;
+// Submodules added in later tasks: query, prune.
 
 use rusqlite::Connection;
 use std::path::Path;
