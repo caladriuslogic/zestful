@@ -49,6 +49,14 @@ fn fetch_since(conn: &Connection, since_ms: i64) -> rusqlite::Result<Vec<EventRo
             seq: row.get(11)?,
             source_pid: row.get(12)?,
             schema_version: row.get(13)?,
+            // Silently tolerate malformed JSON in the JSON columns:
+            // a corrupt event drops out of the tile projection
+            // (derive() returns None when context is None) rather
+            // than aborting the whole projection. This diverges
+            // from query.rs::parse_json_column which raises
+            // FromSqlConversionFailure for the GET /events path,
+            // where loud failure is more useful for debugging
+            // event-pipeline issues. Tiles is best-effort.
             correlation: row.get::<_, Option<String>>(14)?
                 .and_then(|s| serde_json::from_str(&s).ok()),
             context: row.get::<_, Option<String>>(15)?
@@ -84,4 +92,120 @@ fn walk_and_derive(rows: &[EventRow]) -> Vec<derive::DerivedRow> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::store::query::EventRow;
+    use serde_json::json;
+
+    fn er(id: i64, source: &str, event_type: &str, context: serde_json::Value, payload: serde_json::Value, ts: i64) -> EventRow {
+        EventRow {
+            id,
+            received_at: ts,
+            event_id: format!("evt-{}", id),
+            event_type: event_type.to_string(),
+            source: source.to_string(),
+            session_id: None,
+            project: None,
+            host: "h".to_string(),
+            os_user: "u".to_string(),
+            device_id: "d".to_string(),
+            event_ts: ts,
+            seq: 0,
+            source_pid: 1,
+            schema_version: 1,
+            correlation: None,
+            context: Some(context),
+            payload: Some(payload),
+        }
+    }
+
+    fn vscode_view_visible(id: i64, window_pid: &str, view: &str, visible: bool, workspace: &str, ts: i64) -> EventRow {
+        er(
+            id,
+            "vscode-extension",
+            "editor.view.visible",
+            json!({ "application_instance": window_pid, "workspace_root": workspace }),
+            json!({ "view": view, "visible": visible }),
+            ts,
+        )
+    }
+
+    fn vscode_window_focused(id: i64, window_pid: &str, workspace: &str, ts: i64) -> EventRow {
+        er(
+            id,
+            "vscode-extension",
+            "editor.window.focused",
+            json!({ "application_instance": window_pid, "workspace_root": workspace }),
+            json!({}),
+            ts,
+        )
+    }
+
+    #[test]
+    fn walk_and_derive_view_visible_then_window_focused_attributes_correctly() {
+        // T=1000: view.visible visible=true for pid=W1, view=A
+        // T=2000: window.focused for pid=W1
+        // Expected: both events derive; the second uses the rolling map
+        // to attribute its agent as "vscode+A".
+        let rows = vec![
+            vscode_view_visible(1, "W1", "openai.chatgpt", true, "/x", 1000),
+            vscode_window_focused(2, "W1", "/x", 2000),
+        ];
+        let derived = walk_and_derive(&rows);
+        assert_eq!(derived.len(), 2);
+        assert_eq!(derived[0].agent, "vscode+openai.chatgpt");
+        assert_eq!(derived[1].agent, "vscode+openai.chatgpt");
+    }
+
+    #[test]
+    fn walk_and_derive_view_hidden_removes_from_map_so_focus_drops() {
+        // T=1000: view.visible visible=true for W1
+        // T=2000: view.visible visible=false for W1 (hides it)
+        // T=3000: window.focused for W1 — should yield None
+        //         (no longer in map after the hide)
+        let rows = vec![
+            vscode_view_visible(1, "W1", "openai.chatgpt", true, "/x", 1000),
+            vscode_view_visible(2, "W1", "openai.chatgpt", false, "/x", 2000),
+            vscode_window_focused(3, "W1", "/x", 3000),
+        ];
+        let derived = walk_and_derive(&rows);
+        // Visible=true: derives.
+        // Visible=false: derive() returns None for that event.
+        // window.focused: derive() returns None because map empty.
+        assert_eq!(derived.len(), 1);
+        assert_eq!(derived[0].agent, "vscode+openai.chatgpt");
+        assert_eq!(derived[0].received_at, 1000);
+    }
+
+    #[test]
+    fn walk_and_derive_two_windows_have_independent_map_state() {
+        // W1 has view A visible; W2 has view B visible.
+        // window.focused on W1 → vscode+A
+        // window.focused on W2 → vscode+B
+        // Removing W1's view doesn't affect W2.
+        let rows = vec![
+            vscode_view_visible(1, "W1", "view-A", true, "/x", 1000),
+            vscode_view_visible(2, "W2", "view-B", true, "/y", 2000),
+            vscode_window_focused(3, "W1", "/x", 3000),
+            vscode_window_focused(4, "W2", "/y", 4000),
+            vscode_view_visible(5, "W1", "view-A", false, "/x", 5000),
+            vscode_window_focused(6, "W1", "/x", 6000),  // map empty for W1 now
+            vscode_window_focused(7, "W2", "/y", 7000),  // W2 unaffected
+        ];
+        let derived = walk_and_derive(&rows);
+        // Derives: 1 (visible=true), 2 (visible=true), 3, 4, 7 = 5 total.
+        // Skipped: 5 (visible=false), 6 (W1 map empty).
+        assert_eq!(derived.len(), 5, "got {:?}", derived.iter().map(|d| (d.received_at, d.agent.clone())).collect::<Vec<_>>());
+
+        // Check pairings.
+        let agent_at = |ts: i64| derived.iter().find(|d| d.received_at == ts).map(|d| d.agent.as_str());
+        assert_eq!(agent_at(1000), Some("vscode+view-A"));
+        assert_eq!(agent_at(2000), Some("vscode+view-B"));
+        assert_eq!(agent_at(3000), Some("vscode+view-A"));
+        assert_eq!(agent_at(4000), Some("vscode+view-B"));
+        assert_eq!(agent_at(7000), Some("vscode+view-B"));
+    }
 }

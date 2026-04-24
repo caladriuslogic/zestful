@@ -19,6 +19,8 @@ pub fn group(rows: &[DerivedRow]) -> Vec<tile::Tile> {
     let mut tiles: Vec<tile::Tile> = buckets
         .into_iter()
         .map(|((agent, project_anchor, surface_token), bucket)| {
+            // unwrap()s below are safe: bucket is non-empty by construction
+            // (HashMap entry was created on first push() of this row).
             let first_seen_at = bucket.iter().map(|r| r.received_at).min().unwrap();
             let last_seen_at = bucket.iter().map(|r| r.received_at).max().unwrap();
             let event_count = bucket.len() as i64;
@@ -30,6 +32,15 @@ pub fn group(rows: &[DerivedRow]) -> Vec<tile::Tile> {
                 .filter(|r| r.focus_uri.is_some())
                 .max_by_key(|r| r.received_at)
                 .and_then(|r| r.focus_uri.clone());
+            // Invariant: all rows in a bucket share surface_kind, because
+            // surface_token values are produced by per-source code paths
+            // that don't overlap (tmux tokens only from CLI, vscode-window
+            // tokens only from vscode, etc.). debug_assert! catches a
+            // future regression cheaply.
+            debug_assert!(
+                bucket.iter().all(|r| r.surface_kind == bucket[0].surface_kind),
+                "surface_kind mismatch in bucket for surface_token={}", surface_token
+            );
             let surface_kind = bucket[0].surface_kind.clone();
             let id = tile::id_for(&agent, &project_anchor, &surface_token);
             tile::Tile {
