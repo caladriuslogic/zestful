@@ -168,13 +168,13 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
         &agent_name,
         &policy.message,
         policy.severity.as_str(),
-        terminal_uri,
+        terminal_uri.clone(),
         !policy.push,
     )?;
 
     // Also emit structured events to the daemon. Best-effort — errors never
     // propagate. This path runs independently of the legacy /notify path.
-    let envelopes = crate::events::map_hook_payload(agent_kind, &payload);
+    let envelopes = crate::events::map_hook_payload(agent_kind, &payload, terminal_uri);
     if !envelopes.is_empty() {
         if let Err(e) = crate::events::send_to_daemon(&envelopes) {
             crate::log::log("hook", &format!("event emission failed: {}", e));
@@ -198,7 +198,7 @@ mod tests {
             "cwd": "/tmp/proj",
             "session_id": "sess_1",
         });
-        let envs = map_hook_payload(AgentKind::ClaudeCode, &payload);
+        let envs = map_hook_payload(AgentKind::ClaudeCode, &payload, None);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].type_, "turn.prompt_submitted");
         assert_eq!(envs[0].source, "claude-code");
@@ -217,7 +217,7 @@ mod tests {
             "hook_event_name": "beforeReadFile",
             "path": "/etc/passwd",
         });
-        let envs = map_hook_payload(AgentKind::Cursor, &payload);
+        let envs = map_hook_payload(AgentKind::Cursor, &payload, None);
         assert!(envs.is_empty());
     }
 }
