@@ -341,6 +341,21 @@ async fn handle_events(
             crate::events::store::DEFAULT_MAX_BYTES,
         );
 
+        // Broadcast "projection changed" to any /stream subscribers.
+        // One frame per event (batches produce one frame per envelope).
+        let event_type = env.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        crate::events::broadcast::send(
+            crate::events::broadcast::ProjectionChangedFrame {
+                source_event_types: vec![event_type],
+                ts: now_ms,
+                reason: None,
+            }
+        );
+
         let type_ = env.get("type").and_then(|v| v.as_str()).unwrap_or("?");
         let id = env.get("id").and_then(|v| v.as_str()).unwrap_or("?");
         let source = env.get("source").and_then(|v| v.as_str()).unwrap_or("?");
