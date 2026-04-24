@@ -124,6 +124,19 @@ enum Commands {
         #[command(subcommand)]
         command: cmd::events::EventsCommand,
     },
+
+    /// Read the tiles projection from the local event store.
+    Tiles {
+        /// Filter to a single agent slug.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override default 24h window (unix ms lower bound).
+        #[arg(long)]
+        since: Option<i64>,
+        /// Print JSON instead of the human table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -138,6 +151,7 @@ fn main() -> anyhow::Result<()> {
             | Commands::TestFocus { .. }
             | Commands::Hook { .. }
             | Commands::Events { .. }
+            | Commands::Tiles { .. }
     ) {
         config::ensure_daemon();
     }
@@ -172,5 +186,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Hook { agent } => cmd::hook::run(agent),
 
         Commands::Events { command } => cmd::events::run(command),
+
+        Commands::Tiles { agent, since, json } => cmd::tiles::run(agent, since, json),
     }
 }

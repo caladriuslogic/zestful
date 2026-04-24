@@ -8,4 +8,5 @@ pub mod inspect;
 pub mod notify;
 pub mod ssh;
 pub mod test_focus;
+pub mod tiles;
 pub mod watch;
