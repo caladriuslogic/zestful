@@ -542,6 +542,114 @@ async fn handle_tiles(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct NotificationsQuery {
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    rule: Option<String>,
+    #[serde(default)]
+    severity: Option<String>,
+    #[serde(default)]
+    since: Option<i64>,
+}
+
+async fn handle_notifications(
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<NotificationsQuery>,
+) -> impl axum::response::IntoResponse {
+    // Same token gate as /events and /tiles.
+    let expected = config::read_token();
+    let got = headers
+        .get("x-zestful-token")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    match (expected, got) {
+        (Some(e), Some(g)) if e == g => {}
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid token"})),
+            )
+                .into_response();
+        }
+    }
+
+    // Validate severity param before doing any work.
+    let min_severity_rank: Option<u8> = match &q.severity {
+        Some(s) => match s.to_ascii_lowercase().as_str() {
+            "info" => Some(0),
+            "warn" => Some(1),
+            "urgent" => Some(2),
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid severity",
+                        "detail": "expected info|warn|urgent",
+                    })),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let since_ms = q.since.unwrap_or(now_ms - 24 * 3_600_000);
+    let agent_filter = q.agent;
+    let rule_filter = q.rule;
+
+    let result = tokio::task::spawn_blocking(move || {
+        let c = crate::events::store::conn().lock().unwrap();
+        crate::events::notifications::compute(&c, since_ms)
+    })
+    .await
+    .expect("notifications compute task panicked");
+
+    match result {
+        Ok(mut notifications) => {
+            if let Some(a) = agent_filter {
+                notifications.retain(|n| n.agent == a);
+            }
+            if let Some(r) = rule_filter {
+                notifications.retain(|n| n.rule_id == r);
+            }
+            if let Some(min) = min_severity_rank {
+                notifications.retain(|n| {
+                    let rank = match n.severity {
+                        crate::events::notifications::rule::Severity::Info => 0u8,
+                        crate::events::notifications::rule::Severity::Warn => 1,
+                        crate::events::notifications::rule::Severity::Urgent => 2,
+                    };
+                    rank >= min
+                });
+            }
+            let window_hours = ((now_ms - since_ms).max(0) / 3_600_000) as i64;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "notifications": notifications,
+                    "window_hours": window_hours,
+                    "computed_at": now_ms,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "query failed",
+                "detail": e.to_string(),
+            })),
+        )
+            .into_response(),
+    }
+}
+
 /// Validate an envelope JSON per spec §Daemon validation rules. Returns
 /// `Err(detail)` on failure. Payload shapes are NOT validated — unknown types
 /// are accepted for forward-compat.
@@ -606,6 +714,7 @@ fn build_router() -> Router {
                 .layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .route("/tiles", get(handle_tiles).layer(DefaultBodyLimit::max(16_384)))
+        .route("/notifications", get(handle_notifications).layer(DefaultBodyLimit::max(16_384)))
 }
 
 async fn shutdown_signal(pid_file: std::path::PathBuf) {
@@ -1373,6 +1482,46 @@ mod tests {
         let codex_tile_present = tiles.iter().any(|t| t["agent"].as_str() == Some("codex-cli"));
         assert!(!codex_tile_present, "codex-cli tile should have been filtered out, got tiles: {:?}",
                 tiles.iter().map(|t| t["agent"].as_str()).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn notifications_endpoint_401_without_token() {
+        let _home = HomeGuard::new();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/notifications")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn notifications_endpoint_ok_with_auth() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+        let req = Request::builder()
+            .method("GET")
+            .uri("/notifications")
+            .header("x-zestful-token", "test-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn notifications_endpoint_rejects_invalid_severity() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+        let req = Request::builder()
+            .method("GET")
+            .uri("/notifications?severity=critical")
+            .header("x-zestful-token", "test-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
