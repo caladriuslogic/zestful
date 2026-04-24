@@ -100,7 +100,7 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
     } else {
         None
     };
-    if let Some((slug, project, _)) = &codex_editor {
+    if let Some((slug, project, _, _)) = &codex_editor {
         crate::log::log(
             "hook",
             &format!(
@@ -113,7 +113,7 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
     // Codex desktop app has no per-window focus, so per-task tiles would
     // mislead — clicking one lands on whatever Codex window is frontmost.
     // Collapse to a single `codex` tile until per-window focus exists.
-    let agent_name = if let Some((_, project, _)) = &codex_editor {
+    let agent_name = if let Some((_, project, _, _)) = &codex_editor {
         format!("Codex CLI: {}", project)
     } else if is_codex_desktop_app {
         agent_kind.slug().to_string()
@@ -132,7 +132,7 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
     let terminal_uri = crate::workspace::locate().ok().or_else(|| {
         // Codex.app fired, but a VS Code-family window has an active Codex
         // tab — route focus to that window instead of Codex.app.
-        if let Some((slug, project, window_pid)) = &codex_editor {
+        if let Some((slug, project, window_pid, _)) = &codex_editor {
             return Some(format!("workspace://{}/window:{}/project:{}", slug, window_pid, project));
         }
         // Cursor hook: synthesize a workspace-level URI when the hook's

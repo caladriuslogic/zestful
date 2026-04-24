@@ -657,7 +657,7 @@ fn detect_vscode_family() -> Option<VSCodeMatch> {
 /// from the shared `Codex.app` daemon regardless of UI surface — back to
 /// the VS Code-family window the user is actually driving it from.
 #[cfg(target_os = "macos")]
-pub fn find_active_codex_editor() -> Option<(String, String, u32)> {
+pub fn find_active_codex_editor() -> Option<(String, String, u32, String)> {
     use serde::Deserialize;
 
     #[derive(Deserialize)]
@@ -683,8 +683,8 @@ pub fn find_active_codex_editor() -> Option<(String, String, u32)> {
         .join(".config/zestful/vscode");
     let entries = std::fs::read_dir(&dir).ok()?;
 
-    // (tab_active, slug, project, window_pid)
-    let mut best: Option<(bool, String, String, u32)> = None;
+    // (tab_active, slug, project, window_pid, workspace_folder)
+    let mut best: Option<(bool, String, String, u32, String)> = None;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
@@ -707,35 +707,36 @@ pub fn find_active_codex_editor() -> Option<(String, String, u32)> {
         let Some(window_pid) = state.window_pid else {
             continue;
         };
+        // Skip state files without a workspaceFolder — we can't anchor
+        // the tile's project without it.
+        let workspace_folder = match state.workspace_folder.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
         let slug = match state.app_name.as_deref().unwrap_or("") {
             "Cursor" => "cursor",
             "Windsurf" => "windsurf",
             _ => "vscode",
         };
-        let project = state
-            .workspace_folder
-            .as_deref()
-            .and_then(|p| {
-                std::path::Path::new(p)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-            })
+        let project = std::path::Path::new(&workspace_folder)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         if project.is_empty() {
             continue;
         }
-        let candidate = (tab_active, slug.to_string(), project, window_pid);
+        let candidate = (tab_active, slug.to_string(), project, window_pid, workspace_folder);
         best = match best {
             None => Some(candidate),
             Some(prev) if !prev.0 && candidate.0 => Some(candidate), // prefer active
             other => other,
         };
     }
-    best.map(|(_, slug, project, window_pid)| (slug, project, window_pid))
+    best.map(|(_, slug, project, window_pid, ws)| (slug, project, window_pid, ws))
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn find_active_codex_editor() -> Option<(String, String, u32)> {
+pub fn find_active_codex_editor() -> Option<(String, String, u32, String)> {
     None
 }
 
@@ -993,7 +994,12 @@ mod tests {
         let result = find_active_codex_editor();
         assert_eq!(
             result,
-            Some(("vscode".to_string(), "zestful".to_string(), 80836))
+            Some((
+                "vscode".to_string(),
+                "zestful".to_string(),
+                80836,
+                "/Users/x/Development/zestful".to_string(),
+            ))
         );
     }
 
@@ -1023,7 +1029,12 @@ mod tests {
         let result = find_active_codex_editor();
         assert_eq!(
             result,
-            Some(("vscode".to_string(), "Project-Active".to_string(), 200))
+            Some((
+                "vscode".to_string(),
+                "Project-Active".to_string(),
+                200,
+                "/x/Project-Active".to_string(),
+            ))
         );
     }
 
@@ -1036,6 +1047,22 @@ mod tests {
             r#"{
                 "appName": "Visual Studio Code",
                 "workspaceFolder": "/x/NoPid",
+                "codex": { "installed": true, "tabOpen": true, "tabActive": true }
+            }"#,
+        );
+
+        assert_eq!(find_active_codex_editor(), None);
+    }
+
+    #[test]
+    #[serial]
+    fn find_active_codex_editor_skips_state_without_workspace_folder() {
+        let _home = HomeGuard::new();
+        seed_state_file(
+            "no_ws.json",
+            r#"{
+                "windowPid": 100,
+                "appName": "Visual Studio Code",
                 "codex": { "installed": true, "tabOpen": true, "tabActive": true }
             }"#,
         );
@@ -1060,7 +1087,12 @@ mod tests {
         let result = find_active_codex_editor();
         assert_eq!(
             result,
-            Some(("cursor".to_string(), "CursorProj".to_string(), 300))
+            Some((
+                "cursor".to_string(),
+                "CursorProj".to_string(),
+                300,
+                "/x/CursorProj".to_string(),
+            ))
         );
     }
 }
