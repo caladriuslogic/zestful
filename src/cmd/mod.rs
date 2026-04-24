@@ -5,6 +5,7 @@ pub mod events;
 pub mod focus;
 pub mod hook;
 pub mod inspect;
+pub mod notifications;
 pub mod notify;
 pub mod ssh;
 pub mod test_focus;
