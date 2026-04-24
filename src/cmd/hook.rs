@@ -110,6 +110,13 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
         );
     }
 
+    // For Codex-routed-to-VSCode, carry the VS Code workspaceFolder path
+    // through to map_hook_payload so the tile anchors on the user's workspace
+    // (e.g. zestful) instead of Codex.app's task folder (e.g. 2026-04-20-...).
+    let codex_workspace_root: Option<String> = codex_editor
+        .as_ref()
+        .map(|(_, _, _, ws)| ws.clone());
+
     // Codex desktop app has no per-window focus, so per-task tiles would
     // mislead — clicking one lands on whatever Codex window is frontmost.
     // Collapse to a single `codex` tile until per-window focus exists.
@@ -177,7 +184,7 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
 
     // Also emit structured events to the daemon. Best-effort — errors never
     // propagate. This path runs independently of the legacy /notify path.
-    let envelopes = crate::events::map_hook_payload(agent_kind, &payload, terminal_uri, None);
+    let envelopes = crate::events::map_hook_payload(agent_kind, &payload, terminal_uri, codex_workspace_root);
     if !envelopes.is_empty() {
         if let Err(e) = crate::events::send_to_daemon(&envelopes) {
             crate::log::log("hook", &format!("event emission failed: {}", e));
