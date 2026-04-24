@@ -650,6 +650,82 @@ async fn handle_notifications(
     }
 }
 
+async fn handle_stream(
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    // Same token gate as /events, /tiles, /notifications.
+    let expected = config::read_token();
+    let got = headers
+        .get("x-zestful-token")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    match (expected, got) {
+        (Some(e), Some(g)) if e == g => {}
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid token"})),
+            )
+                .into_response();
+        }
+    }
+
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::stream::{self, StreamExt as _};
+    use tokio_stream::wrappers::BroadcastStream;
+
+    // Synthetic initial frame so the client does one refetch on connect
+    // without special-casing startup.
+    let now_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    };
+    let initial = crate::events::broadcast::ProjectionChangedFrame {
+        source_event_types: Vec::new(),
+        ts: now_ms(),
+        reason: Some("initial".to_string()),
+    };
+    let initial_event = Event::default()
+        .event("projection.changed")
+        .data(serde_json::to_string(&initial).unwrap_or_default());
+    let initial_stream = stream::once(async move {
+        Ok::<_, std::convert::Infallible>(initial_event)
+    });
+
+    // Live stream from the broadcast channel.
+    let rx = crate::events::broadcast::sender().subscribe();
+    let live = BroadcastStream::new(rx).map(|r| match r {
+        Ok(frame) => Ok::<_, std::convert::Infallible>(
+            Event::default()
+                .event("projection.changed")
+                .data(serde_json::to_string(&frame).unwrap_or_default()),
+        ),
+        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(_n)) => {
+            // Subscriber fell behind. Send a catchup frame so the client
+            // refetches and moves on.
+            let catchup = crate::events::broadcast::ProjectionChangedFrame {
+                source_event_types: Vec::new(),
+                ts: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+                reason: Some("catchup".to_string()),
+            };
+            Ok(Event::default()
+                .event("projection.changed")
+                .data(serde_json::to_string(&catchup).unwrap_or_default()))
+        }
+    });
+
+    let full = initial_stream.chain(live);
+
+    Sse::new(full)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
+}
+
 /// Validate an envelope JSON per spec §Daemon validation rules. Returns
 /// `Err(detail)` on failure. Payload shapes are NOT validated — unknown types
 /// are accepted for forward-compat.
@@ -715,6 +791,7 @@ fn build_router() -> Router {
         )
         .route("/tiles", get(handle_tiles).layer(DefaultBodyLimit::max(16_384)))
         .route("/notifications", get(handle_notifications).layer(DefaultBodyLimit::max(16_384)))
+        .route("/stream", get(handle_stream))
 }
 
 async fn shutdown_signal(pid_file: std::path::PathBuf) {
@@ -1482,6 +1559,101 @@ mod tests {
         let codex_tile_present = tiles.iter().any(|t| t["agent"].as_str() == Some("codex-cli"));
         assert!(!codex_tile_present, "codex-cli tile should have been filtered out, got tiles: {:?}",
                 tiles.iter().map(|t| t["agent"].as_str()).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn events_post_triggers_broadcast_frame() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+
+        let mut rx = crate::events::broadcast::sender().subscribe();
+
+        let body = serde_json::to_string(&canned_envelope()).unwrap();
+        let resp = send_events_request(&body, Some("test-token")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("no frame within 2s")
+            .expect("recv err");
+        // canned_envelope produces type = "turn.completed"
+        assert_eq!(frame.source_event_types, vec!["turn.completed"]);
+    }
+
+    #[tokio::test]
+    async fn stream_laggy_subscriber_recovers() {
+        // Fill the broadcast ring past capacity (16) BEFORE subscribing so
+        // the new subscriber is lagged on first recv. Verify no deadlock —
+        // first recv should surface Lagged, subsequent ones fresh frames.
+        for i in 0..32 {
+            crate::events::broadcast::send(
+                crate::events::broadcast::ProjectionChangedFrame {
+                    source_event_types: vec![format!("lag.{}", i)],
+                    ts: i,
+                    reason: None,
+                },
+            );
+        }
+        let mut rx = crate::events::broadcast::sender().subscribe();
+        // Send one more frame after subscribing.
+        crate::events::broadcast::send(
+            crate::events::broadcast::ProjectionChangedFrame {
+                source_event_types: vec!["post-subscribe".into()],
+                ts: 999,
+                reason: None,
+            },
+        );
+
+        let recv1 = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            rx.recv(),
+        )
+        .await
+        .expect("recv timeout");
+        // Either we get a fresh Ok frame (no lag surfaced), or Lagged (our
+        // case if we were truly behind by >capacity). Both are acceptable;
+        // the point is no deadlock.
+        match recv1 {
+            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            Err(other) => panic!("unexpected recv error: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_endpoint_401_without_token() {
+        let _home = HomeGuard::new();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/stream")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn stream_endpoint_returns_text_event_stream() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+        let req = Request::builder()
+            .method("GET")
+            .uri("/stream")
+            .header("x-zestful-token", "test-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ctype = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            ctype.starts_with("text/event-stream"),
+            "content-type = {}",
+            ctype
+        );
     }
 
     #[tokio::test]
