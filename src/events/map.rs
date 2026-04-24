@@ -27,10 +27,17 @@ const MESSAGE_MAX: usize = 1024;
 /// (e.g. `cmd/hook.rs`), including any codex-editor or synthesised-project
 /// fallback. Passing `None` produces a context with no `application` or
 /// `application_instance` fields.
+///
+/// `workspace_root_override` is used when the caller has more authoritative
+/// knowledge of the workspace than `payload.cwd` provides — specifically for
+/// Codex-routed-to-VSCode events, where `cwd` points to Codex.app's internal
+/// task folder but the user's actual workspace is the VS Code workspaceFolder.
+/// Empty-string values are treated as unset (fall through to cwd-derived).
 pub fn map_hook_payload(
     agent: AgentKind,
     payload: &Value,
     focus_uri: Option<String>,
+    workspace_root_override: Option<String>,
 ) -> Vec<Envelope> {
     let event = payload
         .get("hook_event_name")
@@ -52,7 +59,7 @@ pub fn map_hook_payload(
     let source_pid = std::process::id();
     let ts = now_unix_ms();
     let correlation = correlation_from(payload);
-    let context = context_from(agent, payload, focus_uri);
+    let context = context_from(agent, payload, focus_uri, workspace_root_override);
 
     payloads
         .into_iter()
@@ -352,12 +359,19 @@ fn context_from(
     agent: AgentKind,
     payload: &Value,
     focus_uri: Option<String>,
+    workspace_root_override: Option<String>,
 ) -> Option<Context> {
     let cwd = payload
         .get("cwd")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let workspace_root = resolve_workspace_root(agent, payload, cwd.as_deref());
+    // workspace_root: prefer the caller's override (e.g. VS Code workspace
+    // folder for Codex-routed-to-VSCode events, where cwd points to Codex.app's
+    // internal task folder) over cwd-derived resolution. Empty-string override
+    // is treated as unset — falls through to cwd logic.
+    let workspace_root = workspace_root_override
+        .filter(|s| !s.is_empty())
+        .or_else(|| resolve_workspace_root(agent, payload, cwd.as_deref()));
     let project = workspace_root
         .as_deref()
         .and_then(|p| std::path::Path::new(p).file_name())
@@ -450,7 +464,7 @@ mod tests {
                 json!("hello world"),
             )]),
         );
-        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None);
+        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None, None);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].type_, "turn.prompt_submitted");
         assert_eq!(envs[0].payload["prompt_preview"], "hello world");
@@ -462,7 +476,7 @@ mod tests {
     #[test]
     fn claude_code_stop_maps_to_turn_completed() {
         let p = payload_with("Stop", serde_json::Map::new());
-        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None);
+        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None, None);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].type_, "turn.completed");
     }
@@ -476,7 +490,7 @@ mod tests {
                 ("tool_input".into(), json!({"command": "ls -la"})),
             ]),
         );
-        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None);
+        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None, None);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].type_, "tool.invoked");
         assert_eq!(envs[0].payload["tool_name"], "Bash");
@@ -493,7 +507,7 @@ mod tests {
                 json!("Needs your attention"),
             )]),
         );
-        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None);
+        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None, None);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].type_, "agent.notified");
         assert_eq!(envs[0].payload["kind"], "notification");
@@ -509,7 +523,7 @@ mod tests {
                 ("message".into(), json!("Write to /etc/passwd?")),
             ]),
         );
-        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None);
+        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None, None);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].type_, "permission.requested");
         assert_eq!(envs[0].payload["kind"], "tool");
@@ -519,7 +533,7 @@ mod tests {
     #[test]
     fn cursor_stop_maps_to_turn_completed() {
         let p = payload_with("stop", serde_json::Map::new());
-        let envs = map_hook_payload(AgentKind::Cursor, &p, None);
+        let envs = map_hook_payload(AgentKind::Cursor, &p, None, None);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].type_, "turn.completed");
     }
@@ -527,14 +541,14 @@ mod tests {
     #[test]
     fn cursor_before_read_file_produces_no_events() {
         let p = payload_with("beforeReadFile", serde_json::Map::new());
-        let envs = map_hook_payload(AgentKind::Cursor, &p, None);
+        let envs = map_hook_payload(AgentKind::Cursor, &p, None, None);
         assert!(envs.is_empty());
     }
 
     #[test]
     fn cursor_after_file_edit_produces_no_events() {
         let p = payload_with("afterFileEdit", serde_json::Map::new());
-        let envs = map_hook_payload(AgentKind::Cursor, &p, None);
+        let envs = map_hook_payload(AgentKind::Cursor, &p, None, None);
         assert!(envs.is_empty());
     }
 
@@ -547,7 +561,7 @@ mod tests {
                 json!("s_codex_42"),
             )]),
         );
-        let envs = map_hook_payload(AgentKind::CodexCli, &p, None);
+        let envs = map_hook_payload(AgentKind::CodexCli, &p, None, None);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].type_, "session.started");
         assert_eq!(envs[0].payload["agent_session_id"], "s_codex_42");
@@ -556,7 +570,7 @@ mod tests {
     #[test]
     fn unknown_event_falls_back_to_agent_notified() {
         let p = payload_with("UnheardOf", serde_json::Map::new());
-        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None);
+        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None, None);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].type_, "agent.notified");
         assert_eq!(envs[0].payload["kind"], "other");
@@ -565,7 +579,7 @@ mod tests {
     #[test]
     fn envelope_has_required_fields() {
         let p = payload_with("Stop", serde_json::Map::new());
-        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None);
+        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None, None);
         let env = &envs[0];
         assert_eq!(env.schema, 1);
         assert!(env.ts > 0);
@@ -586,7 +600,7 @@ mod tests {
                 json!("sess_abc"),
             )]),
         );
-        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None);
+        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None, None);
         let correlation = envs[0].correlation.as_ref().expect("correlation should be set");
         assert_eq!(correlation.session_id.as_deref(), Some("sess_abc"));
     }
@@ -594,7 +608,7 @@ mod tests {
     #[test]
     fn correlation_absent_when_no_ids() {
         let p = payload_with("Stop", serde_json::Map::new());
-        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None);
+        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None, None);
         assert!(envs[0].correlation.is_none());
     }
 
@@ -608,7 +622,7 @@ mod tests {
                 json!(long_prompt),
             )]),
         );
-        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None);
+        let envs = map_hook_payload(AgentKind::ClaudeCode, &p, None, None);
         let preview = envs[0].payload["prompt_preview"].as_str().unwrap();
         assert_eq!(preview.len(), 1024);
         // Hash is of the FULL string, not the preview.
@@ -626,7 +640,7 @@ mod tests {
             "hook_event_name": "Stop",
             "session_id": "sess_drift",
         });
-        let envs = map_hook_payload(AgentKind::ClaudeCode, &payload, None);
+        let envs = map_hook_payload(AgentKind::ClaudeCode, &payload, None, None);
         assert_eq!(envs.len(), 1);
         let v = serde_json::to_value(&envs[0]).unwrap();
         let obj = v.as_object().expect("envelope is object");
@@ -748,7 +762,7 @@ mod tests {
         unsafe { std::env::set_var("CLAUDE_PROJECT_DIR", "/x/env-vars-test"); }
 
         let payload = serde_json::json!({ "cwd": "/whatever" });
-        let ctx = context_from(AgentKind::ClaudeCode, &payload, None).expect("expected Some(ctx)");
+        let ctx = context_from(AgentKind::ClaudeCode, &payload, None, None).expect("expected Some(ctx)");
         let observed_value = ctx
             .env_vars_observed
             .as_ref()
@@ -773,7 +787,7 @@ mod tests {
         // context_from should parse it and set application_instance to "window:80836".
         let payload = serde_json::json!({ "cwd": "/Users/x/Development/zestful" });
         let focus_uri = Some("workspace://vscode/window:80836/project:zestful".to_string());
-        let ctx = context_from(AgentKind::CodexCli, &payload, focus_uri.clone())
+        let ctx = context_from(AgentKind::CodexCli, &payload, focus_uri.clone(), None)
             .expect("expected Some(ctx)");
         assert_eq!(ctx.focus_uri, focus_uri);
         assert_eq!(ctx.application.as_deref(), Some("vscode"));
@@ -783,7 +797,7 @@ mod tests {
     #[test]
     fn context_from_with_none_focus_uri_leaves_application_fields_none() {
         let payload = serde_json::json!({ "cwd": "/x" });
-        let ctx = context_from(AgentKind::ClaudeCode, &payload, None)
+        let ctx = context_from(AgentKind::ClaudeCode, &payload, None, None)
             .expect("expected Some(ctx)");
         assert_eq!(ctx.focus_uri, None);
         assert_eq!(ctx.application, None);
@@ -794,7 +808,7 @@ mod tests {
     fn context_from_with_window_and_tab_joins_instance_segments() {
         let payload = serde_json::json!({ "cwd": "/x" });
         let focus_uri = Some("workspace://iterm2/window:1/tab:2".to_string());
-        let ctx = context_from(AgentKind::ClaudeCode, &payload, focus_uri.clone())
+        let ctx = context_from(AgentKind::ClaudeCode, &payload, focus_uri.clone(), None)
             .expect("expected Some(ctx)");
         assert_eq!(ctx.focus_uri, focus_uri);
         assert_eq!(ctx.application.as_deref(), Some("iTerm2"));
@@ -807,10 +821,72 @@ mod tests {
         // app="codex", application_instance=None.
         let payload = serde_json::json!({ "cwd": "/x" });
         let focus_uri = Some("workspace://codex".to_string());
-        let ctx = context_from(AgentKind::CodexCli, &payload, focus_uri.clone())
+        let ctx = context_from(AgentKind::CodexCli, &payload, focus_uri.clone(), None)
             .expect("expected Some(ctx)");
         assert_eq!(ctx.focus_uri, focus_uri);
         assert_eq!(ctx.application.as_deref(), Some("codex"));
         assert_eq!(ctx.application_instance, None);
+    }
+
+    #[test]
+    fn context_from_workspace_root_override_wins_over_cwd() {
+        let payload = payload_with(
+            "Stop",
+            serde_json::Map::from_iter([(
+                "cwd".into(),
+                Value::String("/tmp/codex-task".into()),
+            )]),
+        );
+        let ctx = context_from(
+            AgentKind::CodexCli,
+            &payload,
+            None,
+            Some("/Users/x/Development/zestful".to_string()),
+        )
+        .expect("expected Some(ctx)");
+        assert_eq!(
+            ctx.workspace_root.as_deref(),
+            Some("/Users/x/Development/zestful")
+        );
+        assert_eq!(ctx.project.as_deref(), Some("zestful"));
+        // cwd is preserved untouched — consumers that want the raw cwd still have it.
+        assert_eq!(ctx.cwd.as_deref(), Some("/tmp/codex-task"));
+    }
+
+    #[test]
+    fn context_from_no_workspace_override_falls_back_to_cwd_logic() {
+        let payload = payload_with(
+            "Stop",
+            serde_json::Map::from_iter([(
+                "cwd".into(),
+                Value::String("/x/y".into()),
+            )]),
+        );
+        // CodexCli has no env var lookup (see workspace_root_env_vars_for);
+        // workspace_root falls back to cwd.
+        let ctx = context_from(AgentKind::CodexCli, &payload, None, None)
+            .expect("expected Some(ctx)");
+        assert_eq!(ctx.workspace_root.as_deref(), Some("/x/y"));
+        assert_eq!(ctx.project.as_deref(), Some("y"));
+    }
+
+    #[test]
+    fn context_from_empty_string_workspace_override_falls_back_to_cwd_logic() {
+        let payload = payload_with(
+            "Stop",
+            serde_json::Map::from_iter([(
+                "cwd".into(),
+                Value::String("/x/y".into()),
+            )]),
+        );
+        let ctx = context_from(
+            AgentKind::CodexCli,
+            &payload,
+            None,
+            Some(String::new()), // empty-string override: treated as unset
+        )
+        .expect("expected Some(ctx)");
+        assert_eq!(ctx.workspace_root.as_deref(), Some("/x/y"));
+        assert_eq!(ctx.project.as_deref(), Some("y"));
     }
 }
