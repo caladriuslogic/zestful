@@ -676,15 +676,12 @@ async fn handle_stream(
 
     // Synthetic initial frame so the client does one refetch on connect
     // without special-casing startup.
-    let now_ms = || {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0)
-    };
     let initial = crate::events::broadcast::ProjectionChangedFrame {
         source_event_types: Vec::new(),
-        ts: now_ms(),
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0),
         reason: Some("initial".to_string()),
     };
     let initial_event = Event::default()
