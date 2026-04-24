@@ -18,9 +18,8 @@ pub fn locate() -> Result<String> {
     // Cursor's sidebar AI agent).
     #[cfg(target_os = "macos")]
     if segments.is_empty() {
-        if let Some((slug, id_segment)) = detect_vscode_family_terminal() {
-            segments.push(slug);
-            segments.push(id_segment);
+        if let Some(vscode_segments) = detect_vscode_family_terminal() {
+            segments.extend(vscode_segments);
         }
     }
 
@@ -446,18 +445,23 @@ enum VSCodeMatch {
     /// Exact integrated-terminal hit: `workspace://<slug>/terminal:<id>`
     Terminal { slug: String, terminal_id: String },
     /// No terminal match but we're inside the editor's process tree, so we
-    /// at least know the editor and its open workspace folder.
-    Project { slug: String, project_name: String },
+    /// at least know the editor, its open workspace folder, and the
+    /// extension-host window PID.
+    Project { slug: String, project_name: String, window_pid: u32 },
 }
 
 #[cfg(target_os = "macos")]
-fn detect_vscode_family_terminal() -> Option<(String, String)> {
+fn detect_vscode_family_terminal() -> Option<Vec<String>> {
     match detect_vscode_family()? {
         VSCodeMatch::Terminal { slug, terminal_id } => {
-            Some((slug, format!("terminal:{}", terminal_id)))
+            Some(vec![slug, format!("terminal:{}", terminal_id)])
         }
-        VSCodeMatch::Project { slug, project_name } => {
-            Some((slug, format!("project:{}", project_name)))
+        VSCodeMatch::Project { slug, project_name, window_pid } => {
+            Some(vec![
+                slug,
+                format!("window:{}", window_pid),
+                format!("project:{}", project_name),
+            ])
         }
     }
 }
@@ -573,6 +577,7 @@ fn detect_vscode_family() -> Option<VSCodeMatch> {
             return Some(VSCodeMatch::Project {
                 slug: slug.clone(),
                 project_name: name.clone(),
+                window_pid: current,
             });
         }
         let output = std::process::Command::new("ps")
@@ -603,19 +608,23 @@ fn detect_vscode_family() -> Option<VSCodeMatch> {
 }
 
 /// Scan the Zestful VS Code extension's state files for any window that is
-/// reporting an active Codex conversation tab. Returns the editor slug and
-/// workspace-folder basename of the best match (preferring a window where
-/// the Codex tab is the active tab over one where it is merely open).
+/// reporting an active Codex conversation tab. Returns the editor slug,
+/// workspace-folder basename, and extension-host window PID of the best
+/// match (preferring a window where the Codex tab is the active tab over
+/// one where it is merely open). State files without a recorded windowPid
+/// are skipped — we can't route without it.
 ///
 /// Used by `zestful hook` to correlate a Codex hook — which always fires
 /// from the shared `Codex.app` daemon regardless of UI surface — back to
 /// the VS Code-family window the user is actually driving it from.
 #[cfg(target_os = "macos")]
-pub fn find_active_codex_editor() -> Option<(String, String)> {
+pub fn find_active_codex_editor() -> Option<(String, String, u32)> {
     use serde::Deserialize;
 
     #[derive(Deserialize)]
     struct StateFile {
+        #[serde(rename = "windowPid")]
+        window_pid: Option<u32>,
         #[serde(rename = "appName")]
         app_name: Option<String>,
         #[serde(rename = "workspaceFolder")]
@@ -635,7 +644,8 @@ pub fn find_active_codex_editor() -> Option<(String, String)> {
         .join(".config/zestful/vscode");
     let entries = std::fs::read_dir(&dir).ok()?;
 
-    let mut best: Option<(bool, String, String)> = None; // (tab_active, slug, project)
+    // (tab_active, slug, project, window_pid)
+    let mut best: Option<(bool, String, String, u32)> = None;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
@@ -653,6 +663,11 @@ pub fn find_active_codex_editor() -> Option<(String, String)> {
         if !tab_open && !tab_active {
             continue;
         }
+        // Skip state files that don't record a windowPid — we can't
+        // route without it.
+        let Some(window_pid) = state.window_pid else {
+            continue;
+        };
         let slug = match state.app_name.as_deref().unwrap_or("") {
             "Cursor" => "cursor",
             "Windsurf" => "windsurf",
@@ -670,18 +685,18 @@ pub fn find_active_codex_editor() -> Option<(String, String)> {
         if project.is_empty() {
             continue;
         }
-        let candidate = (tab_active, slug.to_string(), project);
+        let candidate = (tab_active, slug.to_string(), project, window_pid);
         best = match best {
             None => Some(candidate),
             Some(prev) if !prev.0 && candidate.0 => Some(candidate), // prefer active
             other => other,
         };
     }
-    best.map(|(_, slug, project)| (slug, project))
+    best.map(|(_, slug, project, window_pid)| (slug, project, window_pid))
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn find_active_codex_editor() -> Option<(String, String)> {
+pub fn find_active_codex_editor() -> Option<(String, String, u32)> {
     None
 }
 
@@ -877,4 +892,131 @@ fn detect_shelldon() -> Result<Option<Vec<String>>> {
     }
 
     Ok(Some(vec!["shelldon".into()]))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+
+    /// Temporarily redirect $HOME to a tempdir, restore on drop.
+    /// Mirrors the HomeGuard pattern in src/cmd/daemon.rs tests.
+    struct HomeGuard {
+        old: Option<String>,
+        _td: tempfile::TempDir,
+    }
+    impl HomeGuard {
+        fn new() -> Self {
+            let td = tempfile::TempDir::new().unwrap();
+            let old = std::env::var("HOME").ok();
+            // SAFETY: tests run with --test-threads=1.
+            unsafe { std::env::set_var("HOME", td.path()); }
+            HomeGuard { old, _td: td }
+        }
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: single-threaded tests.
+            unsafe {
+                match &self.old {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    fn seed_state_file(filename: &str, body: &str) {
+        let home = std::env::var_os("HOME").unwrap();
+        let dir = std::path::PathBuf::from(home).join(".config/zestful/vscode");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(filename);
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn find_active_codex_editor_returns_window_pid() {
+        let _home = HomeGuard::new();
+        seed_state_file(
+            "80836.json",
+            r#"{
+                "windowPid": 80836,
+                "appName": "Visual Studio Code",
+                "workspaceFolder": "/Users/x/Development/zestful",
+                "codex": { "installed": true, "tabOpen": true, "tabActive": true }
+            }"#,
+        );
+
+        let result = find_active_codex_editor();
+        assert_eq!(
+            result,
+            Some(("vscode".to_string(), "zestful".to_string(), 80836))
+        );
+    }
+
+    #[test]
+    fn find_active_codex_editor_prefers_active_tab_over_open() {
+        let _home = HomeGuard::new();
+        seed_state_file(
+            "100.json",
+            r#"{
+                "windowPid": 100,
+                "appName": "Visual Studio Code",
+                "workspaceFolder": "/x/Project-Open",
+                "codex": { "installed": true, "tabOpen": true, "tabActive": false }
+            }"#,
+        );
+        seed_state_file(
+            "200.json",
+            r#"{
+                "windowPid": 200,
+                "appName": "Visual Studio Code",
+                "workspaceFolder": "/x/Project-Active",
+                "codex": { "installed": true, "tabOpen": true, "tabActive": true }
+            }"#,
+        );
+
+        let result = find_active_codex_editor();
+        assert_eq!(
+            result,
+            Some(("vscode".to_string(), "Project-Active".to_string(), 200))
+        );
+    }
+
+    #[test]
+    fn find_active_codex_editor_skips_state_without_window_pid() {
+        let _home = HomeGuard::new();
+        seed_state_file(
+            "orphan.json",
+            r#"{
+                "appName": "Visual Studio Code",
+                "workspaceFolder": "/x/NoPid",
+                "codex": { "installed": true, "tabOpen": true, "tabActive": true }
+            }"#,
+        );
+
+        assert_eq!(find_active_codex_editor(), None);
+    }
+
+    #[test]
+    fn find_active_codex_editor_maps_cursor_and_windsurf_app_names() {
+        let _home = HomeGuard::new();
+        seed_state_file(
+            "300.json",
+            r#"{
+                "windowPid": 300,
+                "appName": "Cursor",
+                "workspaceFolder": "/x/CursorProj",
+                "codex": { "installed": true, "tabOpen": true, "tabActive": true }
+            }"#,
+        );
+
+        let result = find_active_codex_editor();
+        assert_eq!(
+            result,
+            Some(("cursor".to_string(), "CursorProj".to_string(), 300))
+        );
+    }
 }
