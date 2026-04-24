@@ -24,7 +24,7 @@ pub fn compute(conn: &Connection, since_ms: i64) -> rusqlite::Result<Vec<tile::T
 
 /// Fetch all events with received_at >= since_ms, ordered ASC by
 /// received_at, then by id ASC for stable tiebreaking.
-fn fetch_since(conn: &Connection, since_ms: i64) -> rusqlite::Result<Vec<EventRow>> {
+pub(crate) fn fetch_since(conn: &Connection, since_ms: i64) -> rusqlite::Result<Vec<EventRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, received_at, event_id, event_type, source, session_id, project,
                 host, os_user, device_id, event_ts, seq, source_pid, schema_version,
@@ -76,7 +76,7 @@ fn fetch_since(conn: &Connection, since_ms: i64) -> rusqlite::Result<Vec<EventRo
 /// view per window" map; for each row, update the map if it's a
 /// view.visible event, then call derive() with the current map state.
 /// Returns all DerivedRows that successfully derived.
-fn walk_and_derive(rows: &[EventRow]) -> Vec<derive::DerivedRow> {
+pub(crate) fn walk_and_derive(rows: &[EventRow]) -> Vec<derive::DerivedRow> {
     let mut active_views = derive::VscodeAttribution::new();
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
