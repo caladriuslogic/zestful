@@ -897,6 +897,7 @@ fn detect_shelldon() -> Result<Option<Vec<String>>> {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use std::io::Write;
 
@@ -937,6 +938,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn find_active_codex_editor_returns_window_pid() {
         let _home = HomeGuard::new();
         seed_state_file(
@@ -957,6 +959,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn find_active_codex_editor_prefers_active_tab_over_open() {
         let _home = HomeGuard::new();
         seed_state_file(
@@ -986,6 +989,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn find_active_codex_editor_skips_state_without_window_pid() {
         let _home = HomeGuard::new();
         seed_state_file(
@@ -1001,6 +1005,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn find_active_codex_editor_maps_cursor_and_windsurf_app_names() {
         let _home = HomeGuard::new();
         seed_state_file(
