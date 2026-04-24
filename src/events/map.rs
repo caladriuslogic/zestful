@@ -22,6 +22,11 @@ const MESSAGE_MAX: usize = 1024;
 /// Build envelopes from a single incoming hook payload. Returns `Vec` because
 /// some hooks map to zero events (e.g. Cursor `beforeReadFile`) or to an
 /// unknown event that produces a fallback.
+///
+/// `focus_uri` is the `workspace://…` URI already computed by the caller
+/// (e.g. `cmd/hook.rs`), including any codex-editor or synthesised-project
+/// fallback. Passing `None` produces a context with no `application` or
+/// `application_instance` fields.
 pub fn map_hook_payload(
     agent: AgentKind,
     payload: &Value,
@@ -368,7 +373,10 @@ fn context_from(
     // (including any codex_editor fallback routing). Don't re-locate.
 
     // application + application_instance: parsed out of the focus_uri.
-    // e.g. workspace://iterm2/window:1/tab:2  →  app="iterm2", instance="window:1/tab:2"
+    // Examples:
+    //   workspace://iterm2/window:1/tab:2          → app="iterm2", instance="window:1/tab:2"
+    //   workspace://vscode/window:80836/project:X  → app="vscode",  instance="window:80836"
+    //   workspace://codex                           → app="codex",   instance=None
     let (application, application_instance) = focus_uri
         .as_deref()
         .and_then(crate::workspace::uri::parse_terminal_uri)
@@ -779,6 +787,30 @@ mod tests {
             .expect("expected Some(ctx)");
         assert_eq!(ctx.focus_uri, None);
         assert_eq!(ctx.application, None);
+        assert_eq!(ctx.application_instance, None);
+    }
+
+    #[test]
+    fn context_from_with_window_and_tab_joins_instance_segments() {
+        let payload = serde_json::json!({ "cwd": "/x" });
+        let focus_uri = Some("workspace://iterm2/window:1/tab:2".to_string());
+        let ctx = context_from(AgentKind::ClaudeCode, &payload, focus_uri.clone())
+            .expect("expected Some(ctx)");
+        assert_eq!(ctx.focus_uri, focus_uri);
+        assert_eq!(ctx.application.as_deref(), Some("iTerm2"));
+        assert_eq!(ctx.application_instance.as_deref(), Some("window:1/tab:2"));
+    }
+
+    #[test]
+    fn context_from_with_app_only_uri_leaves_instance_none() {
+        // The Codex-desktop-no-editor case: workspace://codex has no window/tab.
+        // app="codex", application_instance=None.
+        let payload = serde_json::json!({ "cwd": "/x" });
+        let focus_uri = Some("workspace://codex".to_string());
+        let ctx = context_from(AgentKind::CodexCli, &payload, focus_uri.clone())
+            .expect("expected Some(ctx)");
+        assert_eq!(ctx.focus_uri, focus_uri);
+        assert_eq!(ctx.application.as_deref(), Some("codex"));
         assert_eq!(ctx.application_instance, None);
     }
 }
