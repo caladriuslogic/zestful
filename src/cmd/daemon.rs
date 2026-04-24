@@ -490,7 +490,7 @@ async fn handle_tiles(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let since_ms = q.since.unwrap_or(now_ms - 24 * 3_600_000);
-    let agent_filter = q.agent.clone();
+    let agent_filter = q.agent;
 
     let result = tokio::task::spawn_blocking(move || {
         let c = crate::events::store::conn().lock().unwrap();
@@ -504,11 +504,15 @@ async fn handle_tiles(
             if let Some(a) = agent_filter {
                 tiles.retain(|t| t.agent == a);
             }
+            // Reflect the actual window covered by the result, not the
+            // default. A caller passing ?since=<ts> changes coverage and
+            // consumers that key off window_hours need the real value.
+            let window_hours = ((now_ms - since_ms).max(0) / 3_600_000) as i64;
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "tiles": tiles,
-                    "window_hours": 24,
+                    "window_hours": window_hours,
                     "computed_at": now_ms,
                 })),
             ).into_response()
@@ -1272,6 +1276,173 @@ mod tests {
             future_tiles.iter().all(|t| t["project_anchor"].as_str() != Some("/x-since-test")),
             "expected our tile NOT to appear when since is in the future, but got {:?}",
             future_tiles
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_tiles_filter_by_agent_excludes_others() {
+        let _home = HomeGuard::new();
+        set_test_token("tok-tiles-4");
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        // Seed one claude-code event and one codex-cli event with
+        // distinct project_anchors (so they won't collide with prior tests).
+        let env_claude = serde_json::json!({
+            "id": format!("FILTERAGNT-C-{}", now_ms),
+            "schema": 1, "ts": now_ms, "seq": 0, "host": "h", "os_user": "u",
+            "device_id": "d", "source": "claude-code", "source_pid": 1,
+            "type": "turn.completed",
+            "context": {
+                "agent": "claude-code",
+                "env_vars_observed": { "CLAUDE_PROJECT_DIR": "/x-filter-claude" },
+                "subapplication": { "kind": "tmux", "session": "fc", "pane": "%0" }
+            }
+        });
+        let env_codex = serde_json::json!({
+            "id": format!("FILTERAGNT-X-{}", now_ms),
+            "schema": 1, "ts": now_ms, "seq": 0, "host": "h", "os_user": "u",
+            "device_id": "d", "source": "codex-cli", "source_pid": 1,
+            "type": "turn.completed",
+            "context": {
+                "agent": "codex-cli",
+                "env_vars_observed": { "CLAUDE_PROJECT_DIR": "/x-filter-codex" },
+                "subapplication": { "kind": "tmux", "session": "fx", "pane": "%0" }
+            }
+        });
+
+        for env in [&env_claude, &env_codex] {
+            let post = app()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/events")
+                        .header("content-type", "application/json")
+                        .header("x-zestful-token", "tok-tiles-4")
+                        .body(Body::from(env.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(post.status(), StatusCode::OK);
+        }
+
+        // Filter to claude-code: must INCLUDE the claude tile and EXCLUDE the codex tile.
+        let get = app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/tiles?agent=claude-code")
+                    .header("x-zestful-token", "tok-tiles-4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(get.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tiles = json["tiles"].as_array().unwrap();
+
+        // The claude-code tile we just seeded must appear.
+        let claude_tile_present = tiles.iter().any(|t|
+            t["agent"].as_str() == Some("claude-code")
+                && t["project_anchor"].as_str() == Some("/x-filter-claude")
+        );
+        assert!(claude_tile_present, "claude-code tile missing from filtered result");
+
+        // The codex-cli tile must NOT appear, regardless of project_anchor.
+        let codex_tile_present = tiles.iter().any(|t| t["agent"].as_str() == Some("codex-cli"));
+        assert!(!codex_tile_present, "codex-cli tile should have been filtered out, got tiles: {:?}",
+                tiles.iter().map(|t| t["agent"].as_str()).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn test_get_tiles_default_window_excludes_old_events_since_zero_includes() {
+        let _home = HomeGuard::new();
+        set_test_token("tok-tiles-5");
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        // Seed an event via POST (its received_at lands at ~now).
+        let env = serde_json::json!({
+            "id": format!("01OLDEVENT-T-{}", now_ms),
+            "schema": 1, "ts": now_ms, "seq": 0, "host": "h", "os_user": "u",
+            "device_id": "d", "source": "claude-code", "source_pid": 1,
+            "type": "turn.completed",
+            "context": {
+                "agent": "claude-code",
+                "env_vars_observed": { "CLAUDE_PROJECT_DIR": "/x-old-event-test" },
+                "subapplication": { "kind": "tmux", "session": "old", "pane": "%0" }
+            }
+        });
+        let post = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/events")
+                    .header("content-type", "application/json")
+                    .header("x-zestful-token", "tok-tiles-5")
+                    .body(Body::from(env.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(post.status(), StatusCode::OK);
+
+        // Backdate the row's received_at to 48h ago via direct SQL.
+        let backdated = now_ms - 48 * 3_600_000;
+        {
+            let c = crate::events::store::conn().lock().unwrap();
+            c.execute(
+                "UPDATE events SET received_at = ? WHERE event_id = ?",
+                rusqlite::params![backdated, format!("01OLDEVENT-T-{}", now_ms)],
+            ).unwrap();
+        }
+
+        // Default window (now - 24h): should NOT find our backdated event.
+        let default_get = app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/tiles?agent=claude-code")
+                    .header("x-zestful-token", "tok-tiles-5")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await.unwrap();
+        let default_body = axum::body::to_bytes(default_get.into_body(), usize::MAX).await.unwrap();
+        let default_json: serde_json::Value = serde_json::from_slice(&default_body).unwrap();
+        let default_tiles = default_json["tiles"].as_array().unwrap();
+        assert!(
+            default_tiles.iter().all(|t| t["project_anchor"].as_str() != Some("/x-old-event-test")),
+            "default 24h window should EXCLUDE backdated event, got tiles: {:?}",
+            default_tiles.iter().map(|t| t["project_anchor"].as_str()).collect::<Vec<_>>()
+        );
+
+        // since=0: should INCLUDE the backdated event.
+        let wide_get = app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/tiles?agent=claude-code&since=0")
+                    .header("x-zestful-token", "tok-tiles-5")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await.unwrap();
+        let wide_body = axum::body::to_bytes(wide_get.into_body(), usize::MAX).await.unwrap();
+        let wide_json: serde_json::Value = serde_json::from_slice(&wide_body).unwrap();
+        let wide_tiles = wide_json["tiles"].as_array().unwrap();
+        assert!(
+            wide_tiles.iter().any(|t| t["project_anchor"].as_str() == Some("/x-old-event-test")),
+            "since=0 should INCLUDE backdated event"
         );
     }
 }
