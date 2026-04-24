@@ -74,6 +74,10 @@ pub fn surface_label(surface_kind: &str, surface_token: &str) -> String {
                 if let Some((win, tab_part)) = rest.split_once("/tab:") {
                     return format!("iTerm2 window {} / tab {}", win, tab_part);
                 }
+                // Bare "window:<pid>" with no tab — in this codebase this is
+                // the Codex-in-VSCode case. (iTerm2 always emits
+                // window:X/tab:Y; Codex-in-VSCode produces window:<pid>.)
+                return format!("VS Code window {}", rest);
             }
             surface_token.to_string()
         }
@@ -279,6 +283,16 @@ mod tests {
         assert_eq!(
             surface_label("cli", "window:ttys000/tab:1"),
             "iTerm2 window ttys000 / tab 1"
+        );
+    }
+
+    #[test]
+    fn surface_label_cli_window_only_renders_as_vscode_window() {
+        // Bare window:<pid> token (no /tab:) is produced only by the
+        // Codex-in-VSCode routing path. iTerm2 always emits window:X/tab:Y.
+        assert_eq!(
+            surface_label("cli", "window:80836"),
+            "VS Code window 80836"
         );
     }
 
