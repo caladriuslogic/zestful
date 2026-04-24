@@ -3,7 +3,11 @@
 //! instances.
 
 pub mod agent_completed;
+pub mod permission_pending;
 
 use crate::events::notifications::rule::Rule;
 
-pub static ALL_RULES: &[&dyn Rule] = &[&agent_completed::AgentCompleted];
+pub static ALL_RULES: &[&dyn Rule] = &[
+    &agent_completed::AgentCompleted,
+    &permission_pending::PermissionPending,
+];
