@@ -26,13 +26,13 @@ pub fn compute(conn: &Connection, since_ms: i64) -> rusqlite::Result<Vec<Notific
     let buckets = bucket_events_by_tile(&events);
     let now_ms = unix_now_ms();
 
+    const EMPTY: &[&EventRow] = &[];
     let mut out = Vec::new();
-    let empty: Vec<&EventRow> = Vec::new();
     for tile in &tiles_list {
         let tile_events: &[&EventRow] = buckets
             .get(&tile.id)
             .map(|v| v.as_slice())
-            .unwrap_or(&empty);
+            .unwrap_or(EMPTY);
         for rule in rules::ALL_RULES {
             if let Some(body) = rule.evaluate(tile, tile_events, now_ms) {
                 out.push(assemble(tile, *rule, body));
