@@ -457,6 +457,72 @@ async fn handle_list_events(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct TilesQuery {
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    since: Option<i64>,
+}
+
+async fn handle_tiles(
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<TilesQuery>,
+) -> impl axum::response::IntoResponse {
+    // Same token gate as /events.
+    let expected = config::read_token();
+    let got = headers
+        .get("x-zestful-token")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    match (expected, got) {
+        (Some(e), Some(g)) if e == g => {}
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid token"})),
+            ).into_response();
+        }
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let since_ms = q.since.unwrap_or(now_ms - 24 * 3_600_000);
+    let agent_filter = q.agent.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let c = crate::events::store::conn().lock().unwrap();
+        crate::events::tiles::compute(&c, since_ms)
+    })
+    .await
+    .expect("tiles compute task panicked");
+
+    match result {
+        Ok(mut tiles) => {
+            if let Some(a) = agent_filter {
+                tiles.retain(|t| t.agent == a);
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "tiles": tiles,
+                    "window_hours": 24,
+                    "computed_at": now_ms,
+                })),
+            ).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "tiles compute failed",
+                "detail": e.to_string(),
+            })),
+        ).into_response(),
+    }
+}
+
 /// Validate an envelope JSON per spec §Daemon validation rules. Returns
 /// `Err(detail)` on failure. Payload shapes are NOT validated — unknown types
 /// are accepted for forward-compat.
@@ -520,6 +586,7 @@ fn build_router() -> Router {
                 .get(handle_list_events)
                 .layer(DefaultBodyLimit::max(256 * 1024)),
         )
+        .route("/tiles", get(handle_tiles).layer(DefaultBodyLimit::max(16_384)))
 }
 
 async fn shutdown_signal(pid_file: std::path::PathBuf) {
@@ -1033,5 +1100,178 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["events"].as_array().unwrap().len(), 0);
         assert_eq!(json["has_more"], false);
+    }
+
+    #[tokio::test]
+    async fn test_get_tiles_requires_token() {
+        let _home = HomeGuard::new();
+        set_test_token("tok-tiles-1");
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/tiles")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_get_tiles_returns_tiles_for_seeded_events() {
+        let _home = HomeGuard::new();
+        set_test_token("tok-tiles-2");
+
+        // Seed 2 events that should produce 2 distinct tiles (different surfaces).
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        // Tile A: claude-code on /x in tmux pane 0
+        let env_a = serde_json::json!({
+            "id": format!("01TILESEED-A-{}", now_ms),
+            "schema": 1, "ts": now_ms, "seq": 0, "host": "h", "os_user": "u",
+            "device_id": "d", "source": "claude-code", "source_pid": 1,
+            "type": "turn.completed",
+            "context": {
+                "agent": "claude-code",
+                "env_vars_observed": { "CLAUDE_PROJECT_DIR": "/x" },
+                "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" }
+            }
+        });
+        // Tile B: claude-code on /x in tmux pane 1 (different surface)
+        let env_b = serde_json::json!({
+            "id": format!("01TILESEED-B-{}", now_ms),
+            "schema": 1, "ts": now_ms, "seq": 0, "host": "h", "os_user": "u",
+            "device_id": "d", "source": "claude-code", "source_pid": 1,
+            "type": "turn.completed",
+            "context": {
+                "agent": "claude-code",
+                "env_vars_observed": { "CLAUDE_PROJECT_DIR": "/x" },
+                "subapplication": { "kind": "tmux", "session": "z", "pane": "%1" }
+            }
+        });
+
+        for env in [&env_a, &env_b] {
+            let post = app()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/events")
+                        .header("content-type", "application/json")
+                        .header("x-zestful-token", "tok-tiles-2")
+                        .body(Body::from(env.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(post.status(), StatusCode::OK);
+        }
+
+        let get = app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/tiles?agent=claude-code")
+                    .header("x-zestful-token", "tok-tiles-2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(get.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tiles = json["tiles"].as_array().unwrap();
+
+        // Filter to tiles we just inserted (test DB is shared across tests).
+        let our_tiles: Vec<_> = tiles
+            .iter()
+            .filter(|t| {
+                t["agent"].as_str() == Some("claude-code")
+                    && t["project_anchor"].as_str() == Some("/x")
+            })
+            .collect();
+        assert_eq!(our_tiles.len(), 2, "expected 2 tiles, got {:?}", our_tiles);
+        // Confirm they have distinct surface_tokens.
+        let tokens: std::collections::HashSet<&str> = our_tiles
+            .iter()
+            .map(|t| t["surface_token"].as_str().unwrap())
+            .collect();
+        assert_eq!(tokens.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_tiles_since_param_widens_window() {
+        let _home = HomeGuard::new();
+        set_test_token("tok-tiles-3");
+
+        // Seed an event; query with default 24h should include it.
+        // Then query with since = far_future — should NOT include it.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let env = serde_json::json!({
+            "id": format!("01TILE-SINCE-{}", now_ms),
+            "schema": 1, "ts": now_ms, "seq": 0, "host": "h", "os_user": "u",
+            "device_id": "d", "source": "claude-code", "source_pid": 1,
+            "type": "turn.completed",
+            "context": {
+                "agent": "claude-code",
+                "env_vars_observed": { "CLAUDE_PROJECT_DIR": "/x-since-test" },
+                "subapplication": { "kind": "tmux", "session": "since", "pane": "%0" }
+            }
+        });
+        let post = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST").uri("/events")
+                    .header("content-type", "application/json")
+                    .header("x-zestful-token", "tok-tiles-3")
+                    .body(Body::from(env.to_string()))
+                    .unwrap(),
+            )
+            .await.unwrap();
+        assert_eq!(post.status(), StatusCode::OK);
+
+        // Default window: should include our event.
+        let default_get = app()
+            .oneshot(
+                Request::builder()
+                    .method("GET").uri("/tiles?agent=claude-code")
+                    .header("x-zestful-token", "tok-tiles-3")
+                    .body(Body::empty()).unwrap(),
+            )
+            .await.unwrap();
+        let default_body = axum::body::to_bytes(default_get.into_body(), usize::MAX).await.unwrap();
+        let default_json: serde_json::Value = serde_json::from_slice(&default_body).unwrap();
+        let default_tiles = default_json["tiles"].as_array().unwrap();
+        assert!(
+            default_tiles.iter().any(|t| t["project_anchor"].as_str() == Some("/x-since-test")),
+            "expected to find our tile in default window"
+        );
+
+        // since = now + 1 hour: should EXCLUDE our event.
+        let since = now_ms + 3_600_000;
+        let future_get = app()
+            .oneshot(
+                Request::builder()
+                    .method("GET").uri(&format!("/tiles?since={}", since))
+                    .header("x-zestful-token", "tok-tiles-3")
+                    .body(Body::empty()).unwrap(),
+            )
+            .await.unwrap();
+        let future_body = axum::body::to_bytes(future_get.into_body(), usize::MAX).await.unwrap();
+        let future_json: serde_json::Value = serde_json::from_slice(&future_body).unwrap();
+        let future_tiles = future_json["tiles"].as_array().unwrap();
+        assert!(
+            future_tiles.iter().all(|t| t["project_anchor"].as_str() != Some("/x-since-test")),
+            "expected our tile NOT to appear when since is in the future, but got {:?}",
+            future_tiles
+        );
     }
 }
