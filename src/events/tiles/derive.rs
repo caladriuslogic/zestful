@@ -66,31 +66,36 @@ pub fn derive(
     // attributed tile; otherwise standalone Codex.app tile (collapsed across
     // all tasks).
     if row.source == "codex" {
-        let codex_focus_uri = row
-            .context
-            .as_ref()
-            .and_then(|c| c.get("focus_uri"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        // Synthesize a focus_uri that matches the new attribution. We
+        // intentionally do NOT preserve `row.context.focus_uri`: that field
+        // was set at ingest time (possibly by the legacy hook routing) and
+        // can carry a stale interpretation that contradicts the projection's
+        // current attribution.
         let correlated = vscode_focus
             .ts_ms
             .map(|ts| row.received_at >= ts && row.received_at - ts <= CORRELATION_WINDOW_MS)
             .unwrap_or(false);
         if correlated {
+            let window_pid = vscode_focus.window_pid.clone().unwrap_or_default();
+            let workspace_root = vscode_focus.workspace_root.clone().unwrap_or_default();
+            // workspace://vscode/window:<pid>/project:<basename> for click-to-focus.
+            let project_basename = std::path::Path::new(&workspace_root)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let focus_uri = if !project_basename.is_empty() {
+                Some(format!("workspace://vscode/window:{}/project:{}", window_pid, project_basename))
+            } else {
+                Some(format!("workspace://vscode/window:{}", window_pid))
+            };
             return Some(DerivedRow {
                 agent: "codex".to_string(),
-                project_anchor: vscode_focus
-                    .workspace_root
-                    .clone()
-                    .unwrap_or_default(),
+                project_anchor: workspace_root,
                 surface_kind: "cli".to_string(),
-                surface_token: format!(
-                    "window:{}",
-                    vscode_focus.window_pid.clone().unwrap_or_default()
-                ),
+                surface_token: format!("window:{}", window_pid),
                 received_at: row.received_at,
                 event_type: row.event_type.clone(),
-                focus_uri: codex_focus_uri,
+                focus_uri,
             });
         }
         return Some(DerivedRow {
@@ -100,7 +105,8 @@ pub fn derive(
             surface_token: STANDALONE_CODEX_SURFACE.to_string(),
             received_at: row.received_at,
             event_type: row.event_type.clone(),
-            focus_uri: codex_focus_uri,
+            // Standalone Codex.app — Mac app activation URI.
+            focus_uri: Some("workspace://codex".to_string()),
         });
     }
 
@@ -662,6 +668,11 @@ mod tests {
         assert_eq!(d.project_anchor, "/x/zestful");
         assert_eq!(d.surface_kind, "cli");
         assert_eq!(d.surface_token, "window:80836");
+        // Synthesized focus_uri: workspace_root basename = "zestful".
+        assert_eq!(
+            d.focus_uri.as_deref(),
+            Some("workspace://vscode/window:80836/project:zestful")
+        );
     }
 
     #[test]
@@ -679,6 +690,7 @@ mod tests {
         assert_eq!(d.project_anchor, STANDALONE_CODEX_ANCHOR);
         assert_eq!(d.surface_kind, "cli");
         assert_eq!(d.surface_token, STANDALONE_CODEX_SURFACE);
+        assert_eq!(d.focus_uri.as_deref(), Some("workspace://codex"));
     }
 
     #[test]
@@ -689,5 +701,28 @@ mod tests {
             .expect("expected DerivedRow");
         assert_eq!(d.project_anchor, STANDALONE_CODEX_ANCHOR);
         assert_eq!(d.surface_token, STANDALONE_CODEX_SURFACE);
+        assert_eq!(d.focus_uri.as_deref(), Some("workspace://codex"));
+    }
+
+    #[test]
+    fn derive_codex_does_not_carry_stale_event_focus_uri() {
+        // Even when the event's context carries a focus_uri (e.g. from a legacy
+        // hook ingestion), the standalone branch synthesizes its own.
+        let focus = VscodeRecentFocus::default();
+        let codex = eventrow(
+            1,
+            "codex",
+            "turn.completed",
+            json!({
+                "agent": "codex",
+                "cwd": "/Users/x/Documents/Codex/abc",
+                "focus_uri": "workspace://vscode/window:99/project:wrong",
+            }),
+            json!({}),
+            5_000,
+        );
+        let d = derive(&codex, &VscodeAttribution::new(), &focus)
+            .expect("expected DerivedRow");
+        assert_eq!(d.focus_uri.as_deref(), Some("workspace://codex"));
     }
 }
