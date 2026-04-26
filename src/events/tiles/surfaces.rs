@@ -64,6 +64,12 @@ pub fn vscode_surface_token(window_pid: &str) -> String {
 pub fn surface_label(surface_kind: &str, surface_token: &str) -> String {
     match surface_kind {
         "cli" => {
+            // Standalone Codex.app sentinel — produced by tiles::derive's
+            // standalone branch when no recent vscode-extension focus
+            // signal is present.
+            if surface_token == "codex" {
+                return "Codex.app".to_string();
+            }
             if let Some(rest) = surface_token.strip_prefix("tmux:") {
                 if let Some((session, pane_part)) = rest.split_once("/pane:") {
                     let pane = pane_part.strip_prefix('%').unwrap_or(pane_part);
@@ -111,6 +117,11 @@ pub fn surface_label(surface_kind: &str, surface_token: &str) -> String {
 /// + "…". None if input is None.
 pub fn project_label(project_anchor: Option<&str>) -> Option<String> {
     let anchor = project_anchor?;
+    // Standalone Codex.app sentinel — produced by tiles::derive when
+    // no recent vscode-extension focus signal is present.
+    if anchor == "<codex-app>" {
+        return Some("Codex".to_string());
+    }
     if anchor.contains('/') || anchor.contains('\\') {
         // Treat as path. Basename, stripping trailing slashes/backslashes.
         let trimmed = anchor.trim_end_matches(['/', '\\']);
@@ -381,5 +392,18 @@ mod tests {
     fn surface_label_vscode_empty_pid() {
         // Defensive: empty pid in vscode-window: shouldn't produce trailing space.
         assert_eq!(surface_label("vscode", "vscode-window:"), "VS Code window (unknown)");
+    }
+
+    #[test]
+    fn surface_label_cli_codex_renders_as_codex_app() {
+        assert_eq!(surface_label("cli", "codex"), "Codex.app");
+    }
+
+    #[test]
+    fn project_label_codex_app_anchor_renders_as_codex() {
+        assert_eq!(
+            project_label(Some("<codex-app>")).as_deref(),
+            Some("Codex")
+        );
     }
 }
