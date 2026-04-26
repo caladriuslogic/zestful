@@ -79,54 +79,12 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
                 .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
         })
         .unwrap_or_default();
-    // Codex needs extra logic: the same hook config is shared by the Codex
-    // desktop app and the `codex` CLI run from an editor terminal. The app
-    // puts each task under `~/Documents/Codex/<task-folder>/`, while the CLI
-    // inherits whatever workspace folder the terminal is in.
-    let is_codex_desktop_app = agent_kind == crate::hooks::AgentKind::CodexCli
-        && payload
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(|c| c.contains("/Documents/Codex/"))
-            .unwrap_or(false);
+    // Codex events pass through uninterpreted. Surface attribution
+    // (Codex.app standalone vs Codex-via-VS-Code) is computed by the
+    // tiles projection via temporal correlation with vscode-extension
+    // focus events — see src/events/tiles/derive.rs.
 
-    // Codex.app fires the same hook regardless of whether the user is
-    // driving it from the desktop app or the Codex VS Code extension (which
-    // just proxies to the same daemon). If our VS Code extension reports an
-    // active Codex conversation tab, we re-route this event to that editor
-    // window. Otherwise we keep it on the Codex desktop app.
-    let codex_editor = if is_codex_desktop_app {
-        crate::workspace::find_active_codex_editor()
-    } else {
-        None
-    };
-    if let Some((slug, project, _, _)) = &codex_editor {
-        crate::log::log(
-            "hook",
-            &format!(
-                "codex correlation: routing to {}/project:{} (active tab)",
-                slug, project
-            ),
-        );
-    }
-
-    // For Codex-routed-to-VSCode, carry the VS Code workspaceFolder path
-    // through to map_hook_payload so the tile anchors on the user's workspace
-    // (e.g. zestful) instead of Codex.app's task folder (e.g. 2026-04-20-...).
-    let codex_workspace_root: Option<String> = codex_editor
-        .as_ref()
-        .map(|(_, _, _, ws)| ws.clone());
-
-    // Codex desktop app has no per-window focus, so per-task tiles would
-    // mislead — clicking one lands on whatever Codex window is frontmost.
-    // Collapse to a single `codex` tile until per-window focus exists.
-    let agent_name = if let Some((_, project, _, _)) = &codex_editor {
-        format!("Codex CLI: {}", project)
-    } else if is_codex_desktop_app {
-        agent_kind.slug().to_string()
-    } else if agent_kind == crate::hooks::AgentKind::CodexCli && !project.is_empty() {
-        format!("Codex CLI: {}", project)
-    } else if project.is_empty() {
+    let agent_name = if project.is_empty() {
         agent_kind.slug().to_string()
     } else {
         format!("{}:{}", agent_kind.slug(), project)
@@ -137,20 +95,10 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
     // process we know about — e.g. Cursor's AI agent), fall back to a
     // project-level URI synthesized from the payload for IDE-family agents.
     let terminal_uri = crate::workspace::locate().ok().or_else(|| {
-        // Codex.app fired, but a VS Code-family window has an active Codex
-        // tab — route focus to that window instead of Codex.app.
-        if let Some((slug, project, window_pid, _)) = &codex_editor {
-            return Some(format!("workspace://{}/window:{}/project:{}", slug, window_pid, project));
-        }
         // Cursor hook: synthesize a workspace-level URI when the hook's
         // parent chain doesn't reach the Cursor extension host.
         if agent_kind == crate::hooks::AgentKind::Cursor && !project.is_empty() {
             return Some(format!("workspace://cursor/project:{}", project));
-        }
-        // Codex desktop app with no editor correlation: app-level activation
-        // only (no per-window focus).
-        if is_codex_desktop_app {
-            return Some("workspace://codex".to_string());
         }
         None
     });
