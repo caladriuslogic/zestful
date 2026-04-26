@@ -117,7 +117,10 @@ pub fn derive(
 
     // --- Browser path ---
     if row.source == "chrome-extension" {
-        let url = payload?.get("url").and_then(|v| v.as_str())?;
+        // Chrome extension emits the conversation URL in
+        // `context.focus_uri`, not `payload.url`. The projection reuses
+        // the focus_uri already extracted from context above.
+        let url = focus_uri.as_deref()?;
         let agent = surfaces::browser_agent_for_url(url)?;
         let slug = surfaces::browser_conversation_slug(url)?;
         return Some(DerivedRow {
@@ -384,8 +387,9 @@ mod tests {
 
     #[test]
     fn derive_browser_event_extracts_conversation_slug_and_agent() {
-        let ctx = json!({});
-        let payload = json!({ "url": "https://claude.ai/chats/abc-123" });
+        // Production shape: chrome ext puts the URL in context.focus_uri.
+        let ctx = json!({ "focus_uri": "https://claude.ai/chats/abc-123" });
+        let payload = json!({ "kind": "notification" });
         let r = eventrow(7, "chrome-extension", "agent.notified", ctx, payload, 1000);
         let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
         assert_eq!(d.agent, "claude-web");
@@ -394,18 +398,45 @@ mod tests {
         assert_eq!(d.surface_token, "abc-123");
     }
 
+    /// Regression: chrome extension emits `context.focus_uri` containing
+    /// the chat URL, NOT `payload.url`. Projection must read from there.
+    /// Prior bug: derive() looked for `payload.url` only and dropped the
+    /// row, so no browser tile ever appeared while the user was actively
+    /// chatting on chatgpt.com.
+    #[test]
+    fn derive_browser_event_reads_url_from_context_focus_uri() {
+        // This is the actual shape the chrome extension produces today
+        // (verified against events.db on 2026-04-26):
+        let ctx = json!({
+            "agent": "chatgpt",
+            "focus_uri": "https://chatgpt.com/c/69ebcb2a-675c-83e8-9920-55b333f1aa2b",
+        });
+        let payload = json!({
+            "kind": "notification",
+            "message": "Response complete — I'm not sure about that",
+        });
+        let r = eventrow(99, "chrome-extension", "agent.notified", ctx, payload, 1000);
+        let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default())
+            .expect("expected DerivedRow — projection must accept the chrome ext's actual event shape");
+        assert_eq!(d.agent, "chatgpt-web");
+        assert_eq!(d.project_anchor, "69ebcb2a-675c-83e8-9920-55b333f1aa2b");
+        assert_eq!(d.surface_kind, "browser");
+        assert_eq!(d.surface_token, "69ebcb2a-675c-83e8-9920-55b333f1aa2b");
+    }
+
     #[test]
     fn derive_browser_event_with_no_conversation_url_returns_none() {
-        let ctx = json!({});
-        let payload = json!({ "url": "https://claude.ai/" });
+        // URL exists but isn't a conversation URL (no /chats/<slug> path).
+        let ctx = json!({ "focus_uri": "https://claude.ai/" });
+        let payload = json!({ "kind": "notification" });
         let r = eventrow(8, "chrome-extension", "agent.notified", ctx, payload, 1000);
         assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
     }
 
     #[test]
     fn derive_browser_event_with_unknown_host_returns_none() {
-        let ctx = json!({});
-        let payload = json!({ "url": "https://example.com/" });
+        let ctx = json!({ "focus_uri": "https://example.com/" });
+        let payload = json!({ "kind": "notification" });
         let r = eventrow(9, "chrome-extension", "agent.notified", ctx, payload, 1000);
         assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
     }
