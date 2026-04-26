@@ -24,6 +24,23 @@ pub struct DerivedRow {
 /// in compute() as we walk events in received_at ASC order.
 pub type VscodeAttribution = HashMap<String, String>;
 
+/// How recent (in unix milliseconds) a vscode-extension focus signal must
+/// be relative to a Codex event for the projection to attribute that
+/// Codex event to the focused VS Code window. 5 seconds covers the
+/// "user is actively typing in VS Code right now" case while excluding
+/// stale focus signals from earlier in the session.
+pub const CORRELATION_WINDOW_MS: i64 = 5_000;
+
+/// Sentinel project_anchor for standalone Codex.app tiles. Used so the
+/// existing (agent, project_anchor, surface_token) tile identity tuple
+/// collapses all standalone-Codex events into a single tile regardless
+/// of which task folder Codex.app is currently working in.
+pub const STANDALONE_CODEX_ANCHOR: &str = "<codex-app>";
+
+/// Sentinel surface_token for standalone Codex.app tiles. Pairs with
+/// STANDALONE_CODEX_ANCHOR.
+pub const STANDALONE_CODEX_SURFACE: &str = "codex";
+
 /// Rolling state: the most recent vscode-extension focus signal observed
 /// during a `walk_and_derive` pass. Updated on each `editor.window.focused`
 /// or `editor.view.visible visible=true` event from `vscode-extension`.
@@ -39,7 +56,54 @@ pub struct VscodeRecentFocus {
     pub workspace_root: Option<String>,
 }
 
-pub fn derive(row: &EventRow, vscode_views: &VscodeAttribution) -> Option<DerivedRow> {
+pub fn derive(
+    row: &EventRow,
+    vscode_views: &VscodeAttribution,
+    vscode_focus: &VscodeRecentFocus,
+) -> Option<DerivedRow> {
+    // Codex events: attribute via temporal correlation with the most recent
+    // vscode-extension focus signal. Within CORRELATION_WINDOW_MS → VS-Code
+    // attributed tile; otherwise standalone Codex.app tile (collapsed across
+    // all tasks).
+    if row.source == "codex" {
+        let codex_focus_uri = row
+            .context
+            .as_ref()
+            .and_then(|c| c.get("focus_uri"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let correlated = vscode_focus
+            .ts_ms
+            .map(|ts| row.received_at >= ts && row.received_at - ts <= CORRELATION_WINDOW_MS)
+            .unwrap_or(false);
+        if correlated {
+            return Some(DerivedRow {
+                agent: "codex".to_string(),
+                project_anchor: vscode_focus
+                    .workspace_root
+                    .clone()
+                    .unwrap_or_default(),
+                surface_kind: "cli".to_string(),
+                surface_token: format!(
+                    "window:{}",
+                    vscode_focus.window_pid.clone().unwrap_or_default()
+                ),
+                received_at: row.received_at,
+                event_type: row.event_type.clone(),
+                focus_uri: codex_focus_uri,
+            });
+        }
+        return Some(DerivedRow {
+            agent: "codex".to_string(),
+            project_anchor: STANDALONE_CODEX_ANCHOR.to_string(),
+            surface_kind: "cli".to_string(),
+            surface_token: STANDALONE_CODEX_SURFACE.to_string(),
+            received_at: row.received_at,
+            event_type: row.event_type.clone(),
+            focus_uri: codex_focus_uri,
+        });
+    }
+
     let context = row.context.as_ref()?;
     let payload = row.payload.as_ref();
 
@@ -243,7 +307,7 @@ mod tests {
             "subapplication": { "kind": "tmux", "session": "zestful", "pane": "%0" }
         });
         let r = eventrow(1, "claude-code", "turn.completed", ctx, json!({}), 1000);
-        let d = derive(&r, &VscodeAttribution::new()).expect("expected Some");
+        let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).expect("expected Some");
         assert_eq!(d.agent, "claude-code");
         assert_eq!(d.project_anchor, "/x");
         assert_eq!(d.surface_kind, "cli");
@@ -259,7 +323,7 @@ mod tests {
             "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" }
         });
         let r = eventrow(2, "claude-code", "turn.completed", ctx, json!({}), 1000);
-        let d = derive(&r, &VscodeAttribution::new()).unwrap();
+        let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
         assert_eq!(d.project_anchor, "/x");
     }
 
@@ -271,7 +335,7 @@ mod tests {
             "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" }
         });
         let r = eventrow(3, "claude-code", "turn.completed", ctx, json!({}), 1000);
-        let d = derive(&r, &VscodeAttribution::new()).unwrap();
+        let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
         assert_eq!(d.project_anchor, "/x/sub");
     }
 
@@ -282,7 +346,7 @@ mod tests {
             "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" }
         });
         let r = eventrow(4, "claude-code", "turn.completed", ctx, json!({}), 1000);
-        assert!(derive(&r, &VscodeAttribution::new()).is_none());
+        assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
     }
 
     #[test]
@@ -292,7 +356,7 @@ mod tests {
             "cwd": "/x"
         });
         let r = eventrow(5, "claude-code", "turn.completed", ctx, json!({}), 1000);
-        assert!(derive(&r, &VscodeAttribution::new()).is_none());
+        assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
     }
 
     // --- gemini env var ---
@@ -306,7 +370,7 @@ mod tests {
             "application_instance": "window:ttys000/tab:1"
         });
         let r = eventrow(6, "gemini-cli", "turn.completed", ctx, json!({}), 1000);
-        let d = derive(&r, &VscodeAttribution::new()).unwrap();
+        let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
         assert_eq!(d.project_anchor, "/x");
     }
 
@@ -317,7 +381,7 @@ mod tests {
         let ctx = json!({});
         let payload = json!({ "url": "https://claude.ai/chats/abc-123" });
         let r = eventrow(7, "chrome-extension", "agent.notified", ctx, payload, 1000);
-        let d = derive(&r, &VscodeAttribution::new()).unwrap();
+        let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
         assert_eq!(d.agent, "claude-web");
         assert_eq!(d.project_anchor, "abc-123");
         assert_eq!(d.surface_kind, "browser");
@@ -329,7 +393,7 @@ mod tests {
         let ctx = json!({});
         let payload = json!({ "url": "https://claude.ai/" });
         let r = eventrow(8, "chrome-extension", "agent.notified", ctx, payload, 1000);
-        assert!(derive(&r, &VscodeAttribution::new()).is_none());
+        assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
     }
 
     #[test]
@@ -337,7 +401,7 @@ mod tests {
         let ctx = json!({});
         let payload = json!({ "url": "https://example.com/" });
         let r = eventrow(9, "chrome-extension", "agent.notified", ctx, payload, 1000);
-        assert!(derive(&r, &VscodeAttribution::new()).is_none());
+        assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
     }
 
     // --- vscode ---
@@ -350,7 +414,7 @@ mod tests {
         });
         let payload = json!({ "view": "openai.chatgpt", "visible": true });
         let r = eventrow(10, "vscode-extension", "editor.view.visible", ctx, payload, 1000);
-        let d = derive(&r, &VscodeAttribution::new()).unwrap();
+        let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
         assert_eq!(d.agent, "vscode+openai.chatgpt");
         assert_eq!(d.project_anchor, "/x/Wibble");
         assert_eq!(d.surface_kind, "vscode");
@@ -367,7 +431,7 @@ mod tests {
         });
         let payload = json!({ "view": "openai.chatgpt", "visible": false });
         let r = eventrow(11, "vscode-extension", "editor.view.visible", ctx, payload, 1000);
-        assert!(derive(&r, &VscodeAttribution::new()).is_none());
+        assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
     }
 
     #[test]
@@ -380,7 +444,7 @@ mod tests {
         let r = eventrow(12, "vscode-extension", "editor.window.focused", ctx, payload, 1000);
         let mut views = VscodeAttribution::new();
         views.insert("12345".to_string(), "openai.chatgpt".to_string());
-        let d = derive(&r, &views).unwrap();
+        let d = derive(&r, &views, &VscodeRecentFocus::default()).unwrap();
         assert_eq!(d.agent, "vscode+openai.chatgpt");
     }
 
@@ -392,7 +456,7 @@ mod tests {
         });
         let payload = json!({});
         let r = eventrow(13, "vscode-extension", "editor.window.focused", ctx, payload, 1000);
-        assert!(derive(&r, &VscodeAttribution::new()).is_none());
+        assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
     }
 
     // --- focus_uri propagation ---
@@ -406,7 +470,7 @@ mod tests {
             "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" }
         });
         let r = eventrow(14, "claude-code", "turn.completed", ctx, json!({}), 1000);
-        let d = derive(&r, &VscodeAttribution::new()).unwrap();
+        let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
         assert_eq!(d.focus_uri.as_deref(), Some("workspace://iterm2/window:1/tab:2"));
     }
 
@@ -446,14 +510,14 @@ mod tests {
     fn derive_returns_none_when_context_is_none() {
         let mut r = eventrow(20, "claude-code", "turn.completed", json!({}), json!({}), 1000);
         r.context = None;
-        assert!(derive(&r, &VscodeAttribution::new()).is_none());
+        assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
     }
 
     #[test]
     fn derive_chrome_extension_with_none_payload_returns_none() {
         let mut r = eventrow(21, "chrome-extension", "agent.notified", json!({}), json!({}), 1000);
         r.payload = None;
-        assert!(derive(&r, &VscodeAttribution::new()).is_none());
+        assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
     }
 
     #[test]
@@ -464,7 +528,7 @@ mod tests {
         });
         let payload = json!({});
         let r = eventrow(22, "vscode-extension", "editor.something_unknown", ctx, payload, 1000);
-        assert!(derive(&r, &VscodeAttribution::new()).is_none());
+        assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
     }
 
     #[test]
@@ -478,7 +542,7 @@ mod tests {
             "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" }
         });
         let r = eventrow(23, "claude-code", "turn.completed", ctx, json!({}), 1000);
-        let d = derive(&r, &VscodeAttribution::new()).unwrap();
+        let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
         assert_eq!(d.project_anchor, "/real/path");
     }
 
@@ -571,5 +635,59 @@ mod tests {
             9_000,
         );
         assert_eq!(parse_vscode_focus_signal(&r), None);
+    }
+
+    fn codex_event(id: i64, ts: i64, cwd: &str) -> EventRow {
+        eventrow(
+            id,
+            "codex",
+            "turn.completed",
+            json!({ "agent": "codex", "cwd": cwd, "workspace_root": cwd, "subapplication": null }),
+            json!({}),
+            ts,
+        )
+    }
+
+    #[test]
+    fn derive_codex_correlates_with_recent_vscode_focus_within_5s() {
+        let focus = VscodeRecentFocus {
+            ts_ms: Some(1_000),
+            window_pid: Some("80836".to_string()),
+            workspace_root: Some("/x/zestful".to_string()),
+        };
+        let codex = codex_event(1, 2_000, "/Users/x/Documents/Codex/abc");
+        let d = derive(&codex, &VscodeAttribution::new(), &focus)
+            .expect("expected DerivedRow");
+        assert_eq!(d.agent, "codex");
+        assert_eq!(d.project_anchor, "/x/zestful");
+        assert_eq!(d.surface_kind, "cli");
+        assert_eq!(d.surface_token, "window:80836");
+    }
+
+    #[test]
+    fn derive_codex_falls_back_to_standalone_when_focus_too_old() {
+        let focus = VscodeRecentFocus {
+            ts_ms: Some(0),
+            window_pid: Some("80836".to_string()),
+            workspace_root: Some("/x/zestful".to_string()),
+        };
+        // 10 seconds later — outside 5s correlation window.
+        let codex = codex_event(1, 10_000, "/Users/x/Documents/Codex/abc");
+        let d = derive(&codex, &VscodeAttribution::new(), &focus)
+            .expect("expected DerivedRow");
+        assert_eq!(d.agent, "codex");
+        assert_eq!(d.project_anchor, STANDALONE_CODEX_ANCHOR);
+        assert_eq!(d.surface_kind, "cli");
+        assert_eq!(d.surface_token, STANDALONE_CODEX_SURFACE);
+    }
+
+    #[test]
+    fn derive_codex_falls_back_to_standalone_when_no_focus() {
+        let focus = VscodeRecentFocus::default();
+        let codex = codex_event(1, 5_000, "/Users/x/Documents/Codex/abc");
+        let d = derive(&codex, &VscodeAttribution::new(), &focus)
+            .expect("expected DerivedRow");
+        assert_eq!(d.project_anchor, STANDALONE_CODEX_ANCHOR);
+        assert_eq!(d.surface_token, STANDALONE_CODEX_SURFACE);
     }
 }

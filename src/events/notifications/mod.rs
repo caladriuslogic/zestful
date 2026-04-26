@@ -9,7 +9,7 @@ pub mod rules;
 
 use crate::events::store::query::EventRow;
 use crate::events::tiles;
-use crate::events::tiles::derive::{derive, parse_view_visible_change, VscodeAttribution};
+use crate::events::tiles::derive::{derive, parse_view_visible_change, VscodeAttribution, VscodeRecentFocus};
 use crate::events::tiles::tile::{id_for as tile_id_for, Tile};
 use notification::Notification;
 use rusqlite::Connection;
@@ -50,7 +50,9 @@ pub fn compute(conn: &Connection, since_ms: i64) -> rusqlite::Result<Vec<Notific
 /// bucket. Events that don't derive (no context, malformed, or view
 /// visible=false) are dropped.
 fn bucket_events_by_tile<'a>(events: &'a [EventRow]) -> HashMap<String, Vec<&'a EventRow>> {
+    use crate::events::tiles::derive::parse_vscode_focus_signal;
     let mut attr = VscodeAttribution::new();
+    let mut recent_focus = VscodeRecentFocus::default();
     let mut buckets: HashMap<String, Vec<&EventRow>> = HashMap::new();
     for row in events {
         if let Some((window_pid, view, visible)) = parse_view_visible_change(row) {
@@ -60,7 +62,14 @@ fn bucket_events_by_tile<'a>(events: &'a [EventRow]) -> HashMap<String, Vec<&'a 
                 attr.remove(&window_pid);
             }
         }
-        if let Some(d) = derive(row, &attr) {
+        if let Some((window_pid, workspace_root, ts_ms)) = parse_vscode_focus_signal(row) {
+            recent_focus = VscodeRecentFocus {
+                ts_ms: Some(ts_ms),
+                window_pid: Some(window_pid),
+                workspace_root: Some(workspace_root),
+            };
+        }
+        if let Some(d) = derive(row, &attr, &recent_focus) {
             let tile_id = tile_id_for(&d.agent, &d.project_anchor, &d.surface_token);
             buckets.entry(tile_id).or_default().push(row);
         }
