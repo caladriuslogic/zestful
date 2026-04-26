@@ -88,6 +88,15 @@ pub fn surface_label(surface_kind: &str, surface_token: &str) -> String {
             surface_token.to_string()
         }
         "browser" => {
+            // Per-agent sentinels from tiles::derive — render as the
+            // human-facing website name.
+            match surface_token {
+                "chatgpt" => return "chatgpt.com".to_string(),
+                "claude"  => return "claude.ai".to_string(),
+                "gemini"  => return "gemini.google.com".to_string(),
+                "browser" => return "Browser".to_string(),
+                _ => {}
+            }
             if surface_token.is_empty() {
                 return "conversation".to_string();
             }
@@ -117,11 +126,13 @@ pub fn surface_label(surface_kind: &str, surface_token: &str) -> String {
 /// + "…". None if input is None.
 pub fn project_label(project_anchor: Option<&str>) -> Option<String> {
     let anchor = project_anchor?;
-    // Standalone Codex.app sentinel — produced by tiles::derive when
-    // no recent vscode-extension focus signal is present.
-    if anchor == "<codex-app>" {
-        return Some("Codex".to_string());
-    }
+    // Per-agent sentinels produced by tiles::derive. Each maps to the
+    // user-facing product name.
+    if anchor == "<codex-app>"  { return Some("Codex".to_string()); }
+    if anchor == "<chatgpt>"    { return Some("ChatGPT".to_string()); }
+    if anchor == "<claude-web>" { return Some("Claude".to_string()); }
+    if anchor == "<gemini>"     { return Some("Gemini".to_string()); }
+    if anchor == "<browser>"    { return Some("Browser".to_string()); }
     if anchor.contains('/') || anchor.contains('\\') {
         // Treat as path. Basename, stripping trailing slashes/backslashes.
         let trimmed = anchor.trim_end_matches(['/', '\\']);

@@ -122,12 +122,25 @@ pub fn derive(
         // the focus_uri already extracted from context above.
         let url = focus_uri.as_deref()?;
         let agent = surfaces::browser_agent_for_url(url)?;
-        let slug = surfaces::browser_conversation_slug(url)?;
+        // Validate the URL is a real conversation (not a homepage).
+        // The slug itself is discarded — see anchor/token below.
+        surfaces::browser_conversation_slug(url)?;
+        // Collapse all conversations of the same browser agent into one
+        // tile via per-agent sentinel anchor + surface_token. The
+        // user's mental model: "ChatGPT" is one agent; conversations are
+        // not per-tab tiles. focus_uri retains the latest chat URL so
+        // click-to-focus lands on the most recent conversation.
+        let (anchor, token): (&str, &str) = match agent.as_str() {
+            "chatgpt-web" => ("<chatgpt>", "chatgpt"),
+            "claude-web"  => ("<claude-web>", "claude"),
+            "gemini-web"  => ("<gemini>", "gemini"),
+            _             => ("<browser>", "browser"),
+        };
         return Some(DerivedRow {
             agent,
-            project_anchor: slug.clone(),
+            project_anchor: anchor.to_string(),
             surface_kind: "browser".to_string(),
-            surface_token: slug,
+            surface_token: token.to_string(),
             received_at: row.received_at,
             event_type: row.event_type.clone(),
             focus_uri,
@@ -386,16 +399,71 @@ mod tests {
     // --- browser ---
 
     #[test]
-    fn derive_browser_event_extracts_conversation_slug_and_agent() {
+    fn derive_browser_event_extracts_agent_and_uses_per_agent_sentinels() {
         // Production shape: chrome ext puts the URL in context.focus_uri.
+        // The conversation slug is validated (real chat URL, not homepage)
+        // but discarded for tile identity — we collapse all conversations
+        // of the same browser agent into one tile.
         let ctx = json!({ "focus_uri": "https://claude.ai/chats/abc-123" });
         let payload = json!({ "kind": "notification" });
         let r = eventrow(7, "chrome-extension", "agent.notified", ctx, payload, 1000);
         let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
         assert_eq!(d.agent, "claude-web");
-        assert_eq!(d.project_anchor, "abc-123");
+        assert_eq!(d.project_anchor, "<claude-web>");
         assert_eq!(d.surface_kind, "browser");
-        assert_eq!(d.surface_token, "abc-123");
+        assert_eq!(d.surface_token, "claude");
+    }
+
+    /// Regression: two chatgpt-web events from DIFFERENT conversations
+    /// must collapse to the same tile identity. The user's mental model:
+    /// "ChatGPT" is one agent; conversations are not per-tab tiles.
+    #[test]
+    fn derive_browser_chatgpt_collapses_conversations_to_one_tile() {
+        let make = |id: i64, conv: &str| {
+            eventrow(
+                id,
+                "chrome-extension",
+                "agent.notified",
+                json!({ "agent": "chatgpt", "focus_uri": format!("https://chatgpt.com/c/{}", conv) }),
+                json!({ "kind": "notification", "message": "x" }),
+                1000 + id,
+            )
+        };
+        let a = make(1, "aaaa-aaaa-aaaa-aaaa");
+        let b = make(2, "bbbb-bbbb-bbbb-bbbb");
+        let da = derive(&a, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
+        let db = derive(&b, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
+        assert_eq!(da.agent, db.agent);
+        assert_eq!(da.project_anchor, db.project_anchor,
+            "two chatgpt conversations must share project_anchor");
+        assert_eq!(da.surface_token, db.surface_token,
+            "two chatgpt conversations must share surface_token");
+    }
+
+    /// Different browser agents (chatgpt-web vs claude-web) MUST stay on
+    /// distinct tiles. Otherwise we'd collapse different products into one.
+    #[test]
+    fn derive_browser_chatgpt_and_claude_are_separate_tiles() {
+        let chatgpt = eventrow(
+            1, "chrome-extension", "agent.notified",
+            json!({ "focus_uri": "https://chatgpt.com/c/abc" }),
+            json!({ "kind": "notification" }),
+            1000,
+        );
+        let claude = eventrow(
+            2, "chrome-extension", "agent.notified",
+            json!({ "focus_uri": "https://claude.ai/chats/xyz" }),
+            json!({ "kind": "notification" }),
+            2000,
+        );
+        let dc = derive(&chatgpt, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
+        let dd = derive(&claude, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
+        assert_ne!(dc.agent, dd.agent);
+        // Distinct identity tuple either via agent or anchor or token —
+        // any one suffices.
+        assert!(dc.agent != dd.agent
+                || dc.project_anchor != dd.project_anchor
+                || dc.surface_token != dd.surface_token);
     }
 
     /// Regression: chrome extension emits `context.focus_uri` containing
@@ -419,9 +487,9 @@ mod tests {
         let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default())
             .expect("expected DerivedRow — projection must accept the chrome ext's actual event shape");
         assert_eq!(d.agent, "chatgpt-web");
-        assert_eq!(d.project_anchor, "69ebcb2a-675c-83e8-9920-55b333f1aa2b");
+        assert_eq!(d.project_anchor, "<chatgpt>");
         assert_eq!(d.surface_kind, "browser");
-        assert_eq!(d.surface_token, "69ebcb2a-675c-83e8-9920-55b333f1aa2b");
+        assert_eq!(d.surface_token, "chatgpt");
     }
 
     #[test]
