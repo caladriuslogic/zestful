@@ -14,7 +14,7 @@ pub mod uri;
 #[cfg(target_os = "windows")]
 pub mod win32;
 
-pub use locate::{find_active_codex_editor, locate};
+pub use locate::locate;
 pub use types::*;
 
 use anyhow::Result;
