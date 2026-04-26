@@ -24,6 +24,21 @@ pub struct DerivedRow {
 /// in compute() as we walk events in received_at ASC order.
 pub type VscodeAttribution = HashMap<String, String>;
 
+/// Rolling state: the most recent vscode-extension focus signal observed
+/// during a `walk_and_derive` pass. Updated on each `editor.window.focused`
+/// or `editor.view.visible visible=true` event from `vscode-extension`.
+/// Used by `derive()` to attribute Codex events to a VS Code window when
+/// they occur within a short time-correlation window of a focus signal.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VscodeRecentFocus {
+    /// `received_at` of the most recent qualifying focus event, unix ms.
+    pub ts_ms: Option<i64>,
+    /// `context.application_instance` from that event — the VS Code window pid.
+    pub window_pid: Option<String>,
+    /// `context.workspace_root` from that event.
+    pub workspace_root: Option<String>,
+}
+
 pub fn derive(row: &EventRow, vscode_views: &VscodeAttribution) -> Option<DerivedRow> {
     let context = row.context.as_ref()?;
     let payload = row.payload.as_ref();
@@ -132,6 +147,42 @@ pub fn derive(row: &EventRow, vscode_views: &VscodeAttribution) -> Option<Derive
         event_type: row.event_type.clone(),
         focus_uri,
     })
+}
+
+/// Helper: extract the focus signal `(window_pid, workspace_root, received_at)`
+/// from a vscode-extension event that indicates the user is currently driving
+/// a particular VS Code window. Returns `Some` for:
+///   - `editor.window.focused` events
+///   - `editor.view.visible` events with `payload.visible == true`
+///
+/// Returns `None` for any other event source/type, or when the event is
+/// missing `context.application_instance` or `context.workspace_root`.
+pub fn parse_vscode_focus_signal(row: &EventRow) -> Option<(String, String, i64)> {
+    if row.source != "vscode-extension" {
+        return None;
+    }
+    match row.event_type.as_str() {
+        "editor.window.focused" => {}
+        "editor.view.visible" => {
+            // Only `visible: true` qualifies as a focus signal.
+            let payload = row.payload.as_ref()?;
+            let visible = payload.get("visible").and_then(|v| v.as_bool())?;
+            if !visible {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    let context = row.context.as_ref()?;
+    let window_pid = context
+        .get("application_instance")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    let workspace_root = context
+        .get("workspace_root")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    Some((window_pid, workspace_root, row.received_at))
 }
 
 /// Helper: peek at editor.view.visible events to update the rolling
@@ -447,5 +498,78 @@ mod tests {
         let payload = json!({ "view": "openai.chatgpt" });
         let r = eventrow(25, "vscode-extension", "editor.view.visible", ctx, payload, 1000);
         assert!(parse_view_visible_change(&r).is_none());
+    }
+
+    #[test]
+    fn parse_vscode_focus_signal_returns_signal_for_window_focused() {
+        let r = eventrow(
+            1,
+            "vscode-extension",
+            "editor.window.focused",
+            json!({ "application_instance": "80836", "workspace_root": "/x/zestful" }),
+            json!({}),
+            5_000,
+        );
+        let result = parse_vscode_focus_signal(&r);
+        assert_eq!(
+            result,
+            Some(("80836".to_string(), "/x/zestful".to_string(), 5_000))
+        );
+    }
+
+    #[test]
+    fn parse_vscode_focus_signal_returns_signal_for_view_visible_true() {
+        let r = eventrow(
+            2,
+            "vscode-extension",
+            "editor.view.visible",
+            json!({ "application_instance": "80900", "workspace_root": "/x/other" }),
+            json!({ "view": "openai.codex", "visible": true }),
+            6_000,
+        );
+        let result = parse_vscode_focus_signal(&r);
+        assert_eq!(
+            result,
+            Some(("80900".to_string(), "/x/other".to_string(), 6_000))
+        );
+    }
+
+    #[test]
+    fn parse_vscode_focus_signal_returns_none_for_view_visible_false() {
+        let r = eventrow(
+            3,
+            "vscode-extension",
+            "editor.view.visible",
+            json!({ "application_instance": "80900", "workspace_root": "/x/other" }),
+            json!({ "view": "openai.codex", "visible": false }),
+            7_000,
+        );
+        assert_eq!(parse_vscode_focus_signal(&r), None);
+    }
+
+    #[test]
+    fn parse_vscode_focus_signal_returns_none_for_non_vscode_source() {
+        let r = eventrow(
+            4,
+            "claude-code",
+            "editor.window.focused",
+            json!({ "application_instance": "80900", "workspace_root": "/x/other" }),
+            json!({}),
+            8_000,
+        );
+        assert_eq!(parse_vscode_focus_signal(&r), None);
+    }
+
+    #[test]
+    fn parse_vscode_focus_signal_returns_none_when_application_instance_missing() {
+        let r = eventrow(
+            5,
+            "vscode-extension",
+            "editor.window.focused",
+            json!({ "workspace_root": "/x/other" }),  // no application_instance
+            json!({}),
+            9_000,
+        );
+        assert_eq!(parse_vscode_focus_signal(&r), None);
     }
 }
