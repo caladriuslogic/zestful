@@ -26,15 +26,10 @@ pub type VscodeAttribution = HashMap<String, String>;
 
 /// How recent (in unix milliseconds) a vscode-extension focus signal must
 /// be relative to a Codex event for the projection to attribute that
-/// Codex event to the focused VS Code window. The Zestful VS Code
-/// extension fires `editor.window.focused` only on focus *changes*, not
-/// periodically — so a single focus event has to span a full
-/// type-prompt → wait → response cycle. 10 minutes covers most agent
-/// response times comfortably; long agent workflows that exceed it will
-/// fall back to standalone-Codex attribution until the user clicks back
-/// into the VS Code window (a future "sticky correlation" refinement
-/// could keep attribution alive based on consecutive codex events).
-pub const CORRELATION_WINDOW_MS: i64 = 10 * 60 * 1_000;
+/// Codex event to the focused VS Code window. 5 seconds covers the
+/// "user is actively typing in VS Code right now" case while excluding
+/// stale focus signals from earlier in the session.
+pub const CORRELATION_WINDOW_MS: i64 = 5_000;
 
 /// Sentinel project_anchor for standalone Codex.app tiles. Used so the
 /// existing (agent, project_anchor, surface_token) tile identity tuple
@@ -687,8 +682,8 @@ mod tests {
             window_pid: Some("80836".to_string()),
             workspace_root: Some("/x/zestful".to_string()),
         };
-        // 11 minutes later — outside 10-min correlation window.
-        let codex = codex_event(1, 11 * 60 * 1_000, "/Users/x/Documents/Codex/abc");
+        // 10 seconds later — outside 5s correlation window.
+        let codex = codex_event(1, 10_000, "/Users/x/Documents/Codex/abc");
         let d = derive(&codex, &VscodeAttribution::new(), &focus)
             .expect("expected DerivedRow");
         assert_eq!(d.agent, "codex");

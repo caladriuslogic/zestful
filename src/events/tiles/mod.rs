@@ -230,13 +230,10 @@ mod tests {
 
     #[test]
     fn walk_and_derive_two_codex_events_one_correlated_one_not() {
-        // CORRELATION_WINDOW_MS is 10 minutes. Use 2s (correlated) and
-        // 11min (uncorrelated) so the test stays meaningful regardless
-        // of nearby tweaks to the constant.
         let rows = vec![
             vscode_window_focused(1, "80836", "/x/zestful", 0),
-            codex_event(2, 2_000),               // 2s after focus → correlated
-            codex_event(3, 11 * 60 * 1_000),     // 11min after focus → standalone
+            codex_event(2, 2_000),     // correlated (within 5s of focus)
+            codex_event(3, 32_000),    // uncorrelated (focus is 32s old)
         ];
         let derived = walk_and_derive(&rows);
         let codex_rows: Vec<_> = derived.iter().filter(|d| d.agent == "codex").collect();
