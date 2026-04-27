@@ -573,10 +573,15 @@ async fn handle_log(
 
     let entries = body.0;
     for entry in &entries {
+        // Strip embedded newlines so a multi-line message (e.g., a JS
+        // exception with a stack trace) can't corrupt the one-line-per-
+        // entry log format.
+        let component = entry.component.replace(['\n', '\r'], " ");
+        let message = entry.message.replace(['\n', '\r'], " ");
         crate::log::log_with_ts(
             entry.ts,
-            &entry.component,
-            &format!("{}: {}", entry.level, entry.message),
+            &component,
+            &format!("{}: {}", entry.level, message),
         );
     }
 
@@ -1893,6 +1898,47 @@ mod tests {
             resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::UNPROCESSABLE_ENTITY,
             "expected 400 or 422 for malformed body; got {}",
             resp.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn log_endpoint_strips_embedded_newlines() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+
+        // Multi-line message simulating a JS stack trace.
+        let body = r#"[
+            {"ts":1700000000003,"component":"chrome-ext:content/chatgpt","level":"error","message":"Bridge error: TypeError: x is undefined\n    at foo (bar.js:1:2)\n    at baz (qux.js:3:4)"}
+        ]"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/log")
+            .header("content-type", "application/json")
+            .header("x-zestful-token", "test-token")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let log_path = crate::config::config_dir().join("zestful.log");
+        let contents = std::fs::read_to_string(&log_path).expect("log file should exist");
+
+        // The single entry must produce exactly one log line — newlines
+        // inside `message` get replaced with spaces.
+        let zestful_lines: Vec<&str> = contents
+            .lines()
+            .filter(|l| l.contains("[chrome-ext:content/chatgpt]"))
+            .collect();
+        assert_eq!(
+            zestful_lines.len(),
+            1,
+            "expected exactly one log line for a multi-line message; got:\n{}",
+            contents
+        );
+        assert!(
+            zestful_lines[0].contains("at foo (bar.js:1:2)"),
+            "expected stack trace content preserved on the same line; got: {}",
+            zestful_lines[0]
         );
     }
 }
