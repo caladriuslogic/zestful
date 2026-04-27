@@ -56,7 +56,7 @@ pub fn vscode_surface_token(window_pid: &str) -> String {
 }
 
 /// Human-display label for a surface. Examples:
-/// - cli + "tmux:zestful/pane:%0" → "tmux zestful → pane %0"
+/// - cli + "tmux:zestful/pane:%0" → "tmux [zestful:0]"
 /// - cli + "window:ttys000/tab:1" → "iTerm2 window ttys000 / tab 1"
 /// - browser + "abc12345..." → "conversation abc12345…"
 /// - vscode + "vscode-window:1234" → "VS Code window 1234"
@@ -66,7 +66,8 @@ pub fn surface_label(surface_kind: &str, surface_token: &str) -> String {
         "cli" => {
             if let Some(rest) = surface_token.strip_prefix("tmux:") {
                 if let Some((session, pane_part)) = rest.split_once("/pane:") {
-                    return format!("tmux {} \u{2192} pane {}", session, pane_part);
+                    let pane = pane_part.strip_prefix('%').unwrap_or(pane_part);
+                    return format!("tmux [{}:{}]", session, pane);
                 }
             }
             if let Some(rest) = surface_token.strip_prefix("window:") {
@@ -270,7 +271,7 @@ mod tests {
 
     #[test]
     fn surface_label_cli_tmux() {
-        assert_eq!(surface_label("cli", "tmux:zestful/pane:%0"), "tmux zestful → pane %0");
+        assert_eq!(surface_label("cli", "tmux:zestful/pane:%0"), "tmux [zestful:0]");
     }
 
     #[test]

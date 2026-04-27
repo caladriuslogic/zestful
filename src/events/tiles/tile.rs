@@ -16,7 +16,7 @@ pub struct Tile {
     pub surface_kind: String,
     /// Raw surface token (used in identity).
     pub surface_token: String,
-    /// Friendlier display: "iTerm2 → tmux zestful → pane 0", etc.
+    /// Friendlier display: "tmux [zestful:0]", "VS Code window 1234", etc.
     pub surface_label: String,
     /// Oldest contributing event in window (unix ms).
     pub first_seen_at: i64,
