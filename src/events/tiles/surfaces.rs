@@ -20,7 +20,7 @@ pub fn cli_surface_token(
 }
 
 /// Parse a browser URL to extract the conversation slug.
-/// claude.ai/chats/<uuid> → Some("<uuid>")
+/// claude.ai/chat/<uuid> → Some("<uuid>")
 /// chatgpt.com/c/<uuid> or chat.openai.com/c/<uuid> → Some("<uuid>")
 /// gemini.google.com/app/<chatid> → Some("<chatid>")
 /// Anything else (homepage, unknown site, malformed) → None.
@@ -28,7 +28,7 @@ pub fn browser_conversation_slug(url: &str) -> Option<String> {
     let (host, path) = parse_host_and_path(url)?;
     let path_only = path.split(|c| c == '?' || c == '#').next().unwrap_or("");
     match host.as_str() {
-        "claude.ai" => path_only.strip_prefix("/chats/").map(|s| s.trim_end_matches('/').to_string()),
+        "claude.ai" => path_only.strip_prefix("/chat/").map(|s| s.trim_end_matches('/').to_string()),
         "chatgpt.com" | "chat.openai.com" => path_only.strip_prefix("/c/").map(|s| s.trim_end_matches('/').to_string()),
         "gemini.google.com" => path_only.strip_prefix("/app/").map(|s| s.trim_end_matches('/').to_string()),
         _ => None,
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn browser_slug_claude_ai() {
         assert_eq!(
-            browser_conversation_slug("https://claude.ai/chats/abc-123-def").as_deref(),
+            browser_conversation_slug("https://claude.ai/chat/abc-123-def").as_deref(),
             Some("abc-123-def")
         );
     }
@@ -265,8 +265,27 @@ mod tests {
     #[test]
     fn browser_slug_strips_query_and_fragment() {
         assert_eq!(
-            browser_conversation_slug("https://claude.ai/chats/abc?ref=email#top").as_deref(),
+            browser_conversation_slug("https://claude.ai/chat/abc?ref=email#top").as_deref(),
             Some("abc")
+        );
+    }
+
+    /// Regression: claude.ai uses /chat/<uuid> (singular), not /chats/<id>
+    /// (plural). Production URLs from the chrome extension look like
+    /// https://claude.ai/chat/715b5cef-7e33-434b-aa6d-d9831ac522b2 — verified
+    /// against events.db on 2026-04-27. Prior fixture used /chats/ which
+    /// silently broke the projection: every claude.ai event returned None
+    /// from browser_conversation_slug, derive() dropped it, and no Claude
+    /// browser tile ever appeared.
+    #[test]
+    fn browser_slug_claude_ai_singular_chat_path() {
+        assert_eq!(
+            browser_conversation_slug(
+                "https://claude.ai/chat/715b5cef-7e33-434b-aa6d-d9831ac522b2"
+            )
+            .as_deref(),
+            Some("715b5cef-7e33-434b-aa6d-d9831ac522b2"),
+            "claude.ai uses /chat/ (singular) in production; /chats/ is wrong"
         );
     }
 
@@ -382,7 +401,7 @@ mod tests {
     fn browser_slug_with_port_in_url() {
         // Port should be stripped from host so the match arm fires.
         assert_eq!(
-            browser_conversation_slug("https://claude.ai:443/chats/abc-123").as_deref(),
+            browser_conversation_slug("https://claude.ai:443/chat/abc-123").as_deref(),
             Some("abc-123")
         );
     }

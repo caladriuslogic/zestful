@@ -404,7 +404,7 @@ mod tests {
         // The conversation slug is validated (real chat URL, not homepage)
         // but discarded for tile identity — we collapse all conversations
         // of the same browser agent into one tile.
-        let ctx = json!({ "focus_uri": "https://claude.ai/chats/abc-123" });
+        let ctx = json!({ "focus_uri": "https://claude.ai/chat/abc-123" });
         let payload = json!({ "kind": "notification" });
         let r = eventrow(7, "chrome-extension", "agent.notified", ctx, payload, 1000);
         let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
@@ -452,7 +452,7 @@ mod tests {
         );
         let claude = eventrow(
             2, "chrome-extension", "agent.notified",
-            json!({ "focus_uri": "https://claude.ai/chats/xyz" }),
+            json!({ "focus_uri": "https://claude.ai/chat/xyz" }),
             json!({ "kind": "notification" }),
             2000,
         );
