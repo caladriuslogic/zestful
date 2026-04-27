@@ -117,10 +117,11 @@ pub fn derive(
 
     // --- Browser path ---
     if row.source == "chrome-extension" {
-        // Chrome extension emits the conversation URL in
-        // `context.focus_uri`, not `payload.url`. The projection reuses
-        // the focus_uri already extracted from context above.
-        let url = focus_uri.as_deref()?;
+        // Chrome extension emits the conversation URL in `payload.url`
+        // and a focusable workspace URI in `context.focus_uri`
+        // (workspace://chrome/window:<wid>/tab:<tid>) — the URL is for
+        // tile derivation, the workspace URI is for click-to-focus.
+        let url = payload?.get("url").and_then(|v| v.as_str())?;
         let agent = surfaces::browser_agent_for_url(url)?;
         // Validate the URL is a real conversation (not a homepage).
         // The slug itself is discarded — see anchor/token below.
@@ -400,12 +401,13 @@ mod tests {
 
     #[test]
     fn derive_browser_event_extracts_agent_and_uses_per_agent_sentinels() {
-        // Production shape: chrome ext puts the URL in context.focus_uri.
-        // The conversation slug is validated (real chat URL, not homepage)
+        // Production shape: chrome ext puts the page URL in payload.url
+        // and a focusable workspace URI in context.focus_uri. The
+        // conversation slug is validated (real chat URL, not homepage)
         // but discarded for tile identity — we collapse all conversations
         // of the same browser agent into one tile.
-        let ctx = json!({ "focus_uri": "https://claude.ai/chat/abc-123" });
-        let payload = json!({ "kind": "notification" });
+        let ctx = json!({ "focus_uri": "workspace://chrome/window:42/tab:7" });
+        let payload = json!({ "kind": "notification", "url": "https://claude.ai/chat/abc-123" });
         let r = eventrow(7, "chrome-extension", "agent.notified", ctx, payload, 1000);
         let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
         assert_eq!(d.agent, "claude-web");
@@ -424,8 +426,8 @@ mod tests {
                 id,
                 "chrome-extension",
                 "agent.notified",
-                json!({ "agent": "chatgpt", "focus_uri": format!("https://chatgpt.com/c/{}", conv) }),
-                json!({ "kind": "notification", "message": "x" }),
+                json!({ "agent": "chatgpt", "focus_uri": "workspace://chrome/window:1/tab:2" }),
+                json!({ "kind": "notification", "message": "x", "url": format!("https://chatgpt.com/c/{}", conv) }),
                 1000 + id,
             )
         };
@@ -446,14 +448,14 @@ mod tests {
     fn derive_browser_chatgpt_and_claude_are_separate_tiles() {
         let chatgpt = eventrow(
             1, "chrome-extension", "agent.notified",
-            json!({ "focus_uri": "https://chatgpt.com/c/abc" }),
-            json!({ "kind": "notification" }),
+            json!({ "focus_uri": "workspace://chrome/window:1/tab:1" }),
+            json!({ "kind": "notification", "url": "https://chatgpt.com/c/abc" }),
             1000,
         );
         let claude = eventrow(
             2, "chrome-extension", "agent.notified",
-            json!({ "focus_uri": "https://claude.ai/chat/xyz" }),
-            json!({ "kind": "notification" }),
+            json!({ "focus_uri": "workspace://chrome/window:1/tab:2" }),
+            json!({ "kind": "notification", "url": "https://claude.ai/chat/xyz" }),
             2000,
         );
         let dc = derive(&chatgpt, &VscodeAttribution::new(), &VscodeRecentFocus::default()).unwrap();
@@ -466,22 +468,20 @@ mod tests {
                 || dc.surface_token != dd.surface_token);
     }
 
-    /// Regression: chrome extension emits `context.focus_uri` containing
-    /// the chat URL, NOT `payload.url`. Projection must read from there.
-    /// Prior bug: derive() looked for `payload.url` only and dropped the
-    /// row, so no browser tile ever appeared while the user was actively
-    /// chatting on chatgpt.com.
+    /// Regression: chrome extension emits the chat URL in `payload.url`,
+    /// not `context.focus_uri`. Projection must read from there. The
+    /// workspace URI (used for click-to-focus) lives in
+    /// `context.focus_uri`.
     #[test]
-    fn derive_browser_event_reads_url_from_context_focus_uri() {
-        // This is the actual shape the chrome extension produces today
-        // (verified against events.db on 2026-04-26):
+    fn derive_browser_event_reads_url_from_payload() {
         let ctx = json!({
             "agent": "chatgpt",
-            "focus_uri": "https://chatgpt.com/c/69ebcb2a-675c-83e8-9920-55b333f1aa2b",
+            "focus_uri": "workspace://chrome/window:1024534437/tab:1024534441",
         });
         let payload = json!({
             "kind": "notification",
             "message": "Response complete — I'm not sure about that",
+            "url": "https://chatgpt.com/c/69ebcb2a-675c-83e8-9920-55b333f1aa2b",
         });
         let r = eventrow(99, "chrome-extension", "agent.notified", ctx, payload, 1000);
         let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default())
@@ -494,17 +494,51 @@ mod tests {
 
     #[test]
     fn derive_browser_event_with_no_conversation_url_returns_none() {
-        // URL exists but isn't a conversation URL (no /chats/<slug> path).
-        let ctx = json!({ "focus_uri": "https://claude.ai/" });
-        let payload = json!({ "kind": "notification" });
+        // URL exists but isn't a conversation URL (no /chat/<slug> path).
+        let ctx = json!({ "focus_uri": "workspace://chrome/window:1/tab:1" });
+        let payload = json!({ "kind": "notification", "url": "https://claude.ai/" });
         let r = eventrow(8, "chrome-extension", "agent.notified", ctx, payload, 1000);
         assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
     }
 
+    /// Regression: focus_uri must be a *focusable* workspace URI
+    /// (workspace://chrome/window:<wid>/tab:<tid>) so the Mac app's
+    /// click-to-focus can resolve it back to a real tab — NOT the page
+    /// URL, which is unfocusable. The page URL is needed for tile
+    /// derivation (agent + slug detection) but should live in
+    /// payload.url, leaving context.focus_uri free to carry the
+    /// workspace URI like every other source (claude-code, codex, etc.).
+    /// See the "raw events, no extension-side filtering" memory.
+    #[test]
+    fn derive_browser_event_uses_workspace_uri_as_focus_uri_not_page_url() {
+        let ctx = json!({
+            "agent": "chatgpt",
+            "focus_uri": "workspace://chrome/window:1024534437/tab:1024534441",
+        });
+        let payload = json!({
+            "kind": "notification",
+            "message": "Response complete",
+            "url": "https://chatgpt.com/c/69efcf7a-4134-83e8-a40b-bc6e89ccf88d",
+        });
+        let r = eventrow(100, "chrome-extension", "agent.notified", ctx, payload, 1000);
+        let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default())
+            .expect("derive must read URL from payload.url and accept workspace URI in focus_uri");
+        assert_eq!(d.agent, "chatgpt-web", "agent derived from payload.url");
+        assert_eq!(d.surface_kind, "browser");
+        assert_eq!(d.surface_token, "chatgpt");
+        // The focus_uri returned to the projection must be the workspace
+        // URI, not the page URL — that's what click-to-focus consumes.
+        assert_eq!(
+            d.focus_uri.as_deref(),
+            Some("workspace://chrome/window:1024534437/tab:1024534441"),
+            "focus_uri must be the focusable workspace URI, not the page URL"
+        );
+    }
+
     #[test]
     fn derive_browser_event_with_unknown_host_returns_none() {
-        let ctx = json!({ "focus_uri": "https://example.com/" });
-        let payload = json!({ "kind": "notification" });
+        let ctx = json!({ "focus_uri": "workspace://chrome/window:1/tab:1" });
+        let payload = json!({ "kind": "notification", "url": "https://example.com/" });
         let r = eventrow(9, "chrome-extension", "agent.notified", ctx, payload, 1000);
         assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
     }
