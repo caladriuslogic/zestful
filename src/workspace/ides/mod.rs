@@ -12,6 +12,7 @@ use crate::workspace::types::IdeInstance;
 use anyhow::Result;
 
 pub fn detect_all() -> Result<Vec<IdeInstance>> {
+    #[allow(unused_mut)]
     let mut ides = Vec::new();
 
     #[cfg(target_os = "macos")]

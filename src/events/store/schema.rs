@@ -27,6 +27,7 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// Returns the highest applied migration version, or 0 if none applied.
+#[allow(dead_code)]
 pub fn current_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM _schema_migrations",
