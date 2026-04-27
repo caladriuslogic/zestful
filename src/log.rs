@@ -22,6 +22,41 @@ pub fn log(component: &str, message: &str) {
     }
 }
 
+/// Log a message using a caller-supplied timestamp (unix milliseconds).
+/// Used when relaying logs from another process/context whose own clock
+/// recorded the original event time — e.g., the Chrome extension shipping
+/// logs after the service worker woke from sleep. Format matches `log()`.
+pub fn log_with_ts(ts_ms: i64, component: &str, message: &str) {
+    let timestamp = format_iso_ms(ts_ms);
+    let line = format!("{} [{}] {}\n", timestamp, component, message);
+
+    let log_path = config::config_dir().join("zestful.log");
+
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+/// Format unix-ms as ISO-8601 to match `now()`'s output.
+fn format_iso_ms(ts_ms: i64) -> String {
+    let secs = (ts_ms / 1000).max(0) as u64;
+    let millis = (ts_ms % 1000).max(0) as u64;
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+    let (year, month, day) = days_to_date(days);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}",
+        year, month, day, hours, minutes, seconds, millis
+    )
+}
+
 /// ISO-8601 timestamp without external dependencies.
 fn now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};

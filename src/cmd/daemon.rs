@@ -543,6 +543,51 @@ async fn handle_tiles(
 }
 
 #[derive(serde::Deserialize)]
+struct LogEntry {
+    ts: i64,
+    component: String,
+    level: String,
+    message: String,
+}
+
+async fn handle_log(
+    headers: axum::http::HeaderMap,
+    body: axum::extract::Json<Vec<LogEntry>>,
+) -> impl axum::response::IntoResponse {
+    // Same X-Zestful-Token gate as /events, /tiles, /notifications, /stream.
+    let expected = config::read_token();
+    let got = headers
+        .get("x-zestful-token")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    match (expected, got) {
+        (Some(e), Some(g)) if e == g => {}
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid token"})),
+            )
+                .into_response();
+        }
+    }
+
+    let entries = body.0;
+    for entry in &entries {
+        crate::log::log_with_ts(
+            entry.ts,
+            &entry.component,
+            &format!("{}: {}", entry.level, entry.message),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"accepted": entries.len()})),
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
 struct NotificationsQuery {
     #[serde(default)]
     agent: Option<String>,
@@ -789,6 +834,7 @@ fn build_router() -> Router {
         .route("/tiles", get(handle_tiles).layer(DefaultBodyLimit::max(16_384)))
         .route("/notifications", get(handle_notifications).layer(DefaultBodyLimit::max(16_384)))
         .route("/stream", get(handle_stream))
+        .route("/log", post(handle_log).layer(DefaultBodyLimit::max(64 * 1024)))
 }
 
 async fn shutdown_signal(pid_file: std::path::PathBuf) {
@@ -1776,6 +1822,77 @@ mod tests {
         assert!(
             wide_tiles.iter().any(|t| t["project_anchor"].as_str() == Some("/x-old-event-test")),
             "since=0 should INCLUDE backdated event"
+        );
+    }
+
+    #[tokio::test]
+    async fn log_endpoint_403_without_token() {
+        let _home = HomeGuard::new();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/log")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"[{"ts":1,"component":"chrome-ext:sw","level":"info","message":"hi"}]"#))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn log_endpoint_accepts_valid_batch_and_writes_lines() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+
+        let body = r#"[
+            {"ts":1700000000001,"component":"chrome-ext:sw","level":"info","message":"hello"},
+            {"ts":1700000000002,"component":"chrome-ext:content/chatgpt","level":"warn","message":"x"}
+        ]"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/log")
+            .header("content-type", "application/json")
+            .header("x-zestful-token", "test-token")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let log_path = crate::config::config_dir().join("zestful.log");
+        let contents = std::fs::read_to_string(&log_path).expect("log file should exist after POST /log");
+        assert!(
+            contents.contains("[chrome-ext:sw] info: hello"),
+            "expected SW info line; got log:\n{}",
+            contents
+        );
+        assert!(
+            contents.contains("[chrome-ext:content/chatgpt] warn: x"),
+            "expected content-script warn line; got log:\n{}",
+            contents
+        );
+        assert!(
+            contents.contains("2023-11-14T") && contents.contains(".001 [chrome-ext:sw]"),
+            "expected per-entry ts to drive the line prefix; got log:\n{}",
+            contents
+        );
+    }
+
+    #[tokio::test]
+    async fn log_endpoint_rejects_malformed_json() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/log")
+            .header("content-type", "application/json")
+            .header("x-zestful-token", "test-token")
+            .body(Body::from(r#"{"not":"an array"}"#))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert!(
+            resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::UNPROCESSABLE_ENTITY,
+            "expected 400 or 422 for malformed body; got {}",
+            resp.status()
         );
     }
 }
