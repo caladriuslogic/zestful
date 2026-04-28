@@ -107,10 +107,10 @@ pub fn surface_label(surface_kind: &str, surface_token: &str) -> String {
 /// + "…". None if input is None.
 pub fn project_label(project_anchor: Option<&str>) -> Option<String> {
     let anchor = project_anchor?;
-    if anchor.contains('/') {
-        // Treat as path. Basename, stripping trailing slashes.
-        let trimmed = anchor.trim_end_matches('/');
-        let base = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    if anchor.contains('/') || anchor.contains('\\') {
+        // Treat as path. Basename, stripping trailing slashes/backslashes.
+        let trimmed = anchor.trim_end_matches(['/', '\\']);
+        let base = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
         if base.is_empty() {
             return Some(anchor.to_string());
         }
@@ -310,6 +310,16 @@ mod tests {
     #[test]
     fn project_label_path_with_trailing_slash() {
         assert_eq!(project_label(Some("/Users/x/Development/Fubar/")).as_deref(), Some("Fubar"));
+    }
+
+    #[test]
+    fn project_label_windows_path_returns_basename() {
+        assert_eq!(project_label(Some(r"C:\Work Source\CaladriusLogic")).as_deref(), Some("CaladriusLogic"));
+    }
+
+    #[test]
+    fn project_label_windows_path_with_trailing_backslash() {
+        assert_eq!(project_label(Some(r"C:\Work Source\CaladriusLogic\")).as_deref(), Some("CaladriusLogic"));
     }
 
     #[test]

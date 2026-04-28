@@ -236,20 +236,51 @@ fn find_classic_console() -> Option<(String, String)> {
     // Pass our own PID explicitly — do NOT use $PID inside the script, which is the
     // spawned powershell.exe process and would match itself as "powershell" immediately.
     let our_pid = std::process::id();
+    // Walk the full ancestor chain and pick the OUTERMOST matching shell within
+    // the agent process boundary. Two design choices here:
+    //
+    // 1. We take the outermost (last) shell rather than the first, because
+    //    agents like Claude Code spawn a new ephemeral shell subprocess for each
+    //    hook invocation. That ephemeral shell appears first in the walk and has
+    //    a unique PID every time, producing a new tile per event. The shell just
+    //    inside the agent process has a stable PID across hook calls.
+    //
+    // 2. We stop when we hit a known agent binary (claude.exe, code.exe, …).
+    //    Crossing the agent boundary risks picking up a terminal that belongs to
+    //    a completely different context (e.g. the VS Code integrated terminal
+    //    that launched Claude Code).
     let script = format!(
         r#"
+$agentNames = @('claude.exe','code.exe','cursor.exe','codex.exe','windsurf.exe')
 $procMap = @{{}}
 Get-CimInstance Win32_Process | ForEach-Object {{
     $procMap[[uint32]$_.ProcessId] = [PSCustomObject]@{{ ppid = [uint32]$_.ParentProcessId; name = $_.Name.ToLower() }}
 }}
 $cur = [uint32]{our_pid}
-for ($i = 0; $i -lt 10 -and $cur -gt 1; $i++) {{
+$lastKind = $null
+$lastPid  = $null
+$agentPid = $null
+for ($i = 0; $i -lt 15 -and $cur -gt 1; $i++) {{
     $entry = $procMap[$cur]
-    if (-not $entry) {{ break }}
-    if ($entry.name -eq 'cmd.exe') {{ Write-Output "cmd|$cur"; exit }}
-    if ($entry.name -eq 'powershell.exe' -or $entry.name -eq 'pwsh.exe') {{ Write-Output "powershell|$cur"; exit }}
+    if (-not $entry) {{ [Console]::Error.WriteLine("cc-walk: pid=$cur not in map, stopping"); break }}
+    [Console]::Error.WriteLine("cc-walk: pid=$cur name=$($entry.name) ppid=$($entry.ppid)")
+    if ($agentNames -contains $entry.name) {{ $agentPid = $cur; break }}
+    if ($entry.name -eq 'cmd.exe') {{ $lastKind = 'cmd'; $lastPid = $cur }}
+    elseif ($entry.name -eq 'powershell.exe' -or $entry.name -eq 'pwsh.exe') {{ $lastKind = 'powershell'; $lastPid = $cur }}
+    elseif ($entry.name -eq 'bash.exe') {{ $lastKind = 'bash'; $lastPid = $cur }}
     $cur = $entry.ppid
 }}
+# If the only shell we found is a direct child of the agent, it is an ephemeral
+# hook subprocess spawned fresh for each invocation — its PID changes every call.
+# Use the agent PID instead: it is stable for the lifetime of the session.
+if ($lastKind -and $agentPid) {{
+    $shellEntry = $procMap[$lastPid]
+    if ($shellEntry -and $shellEntry.ppid -eq $agentPid) {{
+        [Console]::Error.WriteLine("cc-walk: shell $lastPid is ephemeral child of agent $agentPid, using agent pid")
+        $lastPid = $agentPid
+    }}
+}}
+if ($lastKind) {{ Write-Output "$lastKind|$lastPid" }}
 "#
     );
 
@@ -257,6 +288,14 @@ for ($i = 0; $i -lt 10 -and $cur -gt 1; $i++) {{
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
         .ok()?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in stderr.trim().lines() {
+        let line = line.trim();
+        if !line.is_empty() {
+            crate::log::log("cc-locate", line);
+        }
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout.trim();

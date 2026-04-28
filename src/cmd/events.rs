@@ -56,6 +56,8 @@ pub enum EventsCommand {
         #[arg(long)]
         agent: Option<String>,
     },
+    /// Delete all events from the local store.
+    Clear,
 }
 
 pub fn run(command: EventsCommand) -> anyhow::Result<()> {
@@ -83,6 +85,7 @@ pub fn run(command: EventsCommand) -> anyhow::Result<()> {
         EventsCommand::Count {
             since, until, source, event_type, session_id, agent,
         } => run_count(since, until, source, event_type, session_id, agent),
+        EventsCommand::Clear => run_clear(),
     }
 }
 
@@ -208,6 +211,13 @@ fn run_count(
     let c = crate::events::store::conn().lock().unwrap();
     let n = crate::events::store::query::count(&c, &filters)?;
     println!("{}", n);
+    Ok(())
+}
+
+fn run_clear() -> anyhow::Result<()> {
+    let c = crate::events::store::conn().lock().unwrap();
+    let deleted = c.execute("DELETE FROM events", [])?;
+    println!("Deleted {} event(s).", deleted);
     Ok(())
 }
 
