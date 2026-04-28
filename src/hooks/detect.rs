@@ -157,15 +157,19 @@ fn detect_by_schema(payload: &serde_json::Value) -> Option<AgentKind> {
     {
         return Some(AgentKind::Cursor);
     }
-    // `transcript_path` prefix is the strongest discriminator between Codex
-    // and Claude Code — both payloads carry `permission_mode` and
-    // `hook_event_name`, so neither is on its own a reliable signal.
+    // `transcript_path` prefix is the strongest discriminator between Codex,
+    // Cursor, and Claude Code — all three payloads carry `hook_event_name`,
+    // so that field alone is not a reliable signal. Check both Unix and
+    // Windows path separators so detection works cross-platform.
     if let Some(path) = obj.get("transcript_path").and_then(|v| v.as_str()) {
-        if path.contains("/.codex/") {
+        if path.contains("/.codex/") || path.contains("\\.codex\\") {
             return Some(AgentKind::CodexCli);
         }
-        if path.contains("/.claude/") {
+        if path.contains("/.claude/") || path.contains("\\.claude\\") {
             return Some(AgentKind::ClaudeCode);
+        }
+        if path.contains("/.cursor/") || path.contains("\\.cursor\\") {
+            return Some(AgentKind::Cursor);
         }
     }
     // Codex tags every turn-scoped event with `turn_id`; Claude Code uses
@@ -184,4 +188,57 @@ fn detect_by_schema(payload: &serde_json::Value) -> Option<AgentKind> {
         return Some(AgentKind::ClaudeCode);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn schema_unix_transcript_paths_detect_correctly() {
+        let claude = json!({ "hook_event_name": "Stop", "transcript_path": "/Users/x/.claude/sessions/abc.jsonl" });
+        assert_eq!(detect_by_schema(&claude), Some(AgentKind::ClaudeCode));
+
+        let codex = json!({ "hook_event_name": "Stop", "transcript_path": "/Users/x/.codex/sessions/abc.jsonl" });
+        assert_eq!(detect_by_schema(&codex), Some(AgentKind::CodexCli));
+
+        let cursor = json!({ "hook_event_name": "stop", "transcript_path": "/Users/x/.cursor/sessions/abc.jsonl" });
+        assert_eq!(detect_by_schema(&cursor), Some(AgentKind::Cursor));
+    }
+
+    #[test]
+    fn schema_windows_transcript_paths_detect_correctly() {
+        let claude = json!({ "hook_event_name": "Stop", "transcript_path": r"C:\Users\Ashley\.claude\sessions\abc.jsonl" });
+        assert_eq!(detect_by_schema(&claude), Some(AgentKind::ClaudeCode));
+
+        let codex = json!({ "hook_event_name": "Stop", "transcript_path": r"C:\Users\Ashley\.codex\sessions\abc.jsonl" });
+        assert_eq!(detect_by_schema(&codex), Some(AgentKind::CodexCli));
+
+        let cursor = json!({ "hook_event_name": "stop", "transcript_path": r"C:\Users\Ashley\.cursor\sessions\abc.jsonl" });
+        assert_eq!(detect_by_schema(&cursor), Some(AgentKind::Cursor));
+    }
+
+    #[test]
+    fn schema_cursor_workspace_roots_wins_over_transcript_path() {
+        // workspace_roots fires the Cursor check before we inspect transcript_path.
+        let cursor = json!({
+            "hook_event_name": "stop",
+            "workspace_roots": [r"C:\Users\Ashley\zestful"],
+            "transcript_path": r"C:\Users\Ashley\.cursor\sessions\abc.jsonl",
+        });
+        assert_eq!(detect_by_schema(&cursor), Some(AgentKind::Cursor));
+    }
+
+    #[test]
+    fn schema_tool_use_id_detects_claude_code() {
+        let payload = json!({ "hook_event_name": "PreToolUse", "tool_use_id": "tu_abc" });
+        assert_eq!(detect_by_schema(&payload), Some(AgentKind::ClaudeCode));
+    }
+
+    #[test]
+    fn schema_turn_id_detects_codex() {
+        let payload = json!({ "hook_event_name": "Stop", "turn_id": "t_abc" });
+        assert_eq!(detect_by_schema(&payload), Some(AgentKind::CodexCli));
+    }
 }

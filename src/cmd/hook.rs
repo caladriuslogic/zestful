@@ -15,6 +15,9 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
     let mut raw = String::new();
     std::io::stdin().read_to_string(&mut raw)?;
 
+    // Cursor on Windows prepends a UTF-8 BOM; strip it before parsing.
+    let raw = raw.trim_start_matches('\u{FEFF}');
+
     let preview: String = raw.chars().take(500).collect();
     crate::log::log("hook", &format!("stdin ({} bytes): {}", raw.len(), preview));
 
@@ -22,7 +25,7 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
         crate::log::log("hook", &format!("--agent override: {}", agent));
     }
 
-    let payload: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|e| {
+    let payload: serde_json::Value = serde_json::from_str(raw).unwrap_or_else(|e| {
         crate::log::log("hook", &format!("JSON parse error: {}", e));
         serde_json::Value::Null
     });
