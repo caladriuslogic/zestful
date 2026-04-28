@@ -115,6 +115,38 @@ pub fn derive(
 
     let focus_uri = context.get("focus_uri").and_then(|v| v.as_str()).map(String::from);
 
+    // --- zestful-app (Mac app) path ---
+    // Events emitted by the Mac app (e.g. focus.acknowledged when the
+    // user clicks the overlay or the Focus button) carry an explicit
+    // tile-identity tuple in `context` so they associate with the same
+    // tile as the trigger event, regardless of that tile's original
+    // source. focus_uri is intentionally None: these events don't drive
+    // click-to-focus, they record that the user already focused.
+    if row.source == "zestful-app" {
+        let agent = context.get("agent").and_then(|v| v.as_str())?.to_string();
+        let project_anchor = context
+            .get("project_anchor")
+            .and_then(|v| v.as_str())?
+            .to_string();
+        let surface_kind = context
+            .get("surface_kind")
+            .and_then(|v| v.as_str())?
+            .to_string();
+        let surface_token = context
+            .get("surface_token")
+            .and_then(|v| v.as_str())?
+            .to_string();
+        return Some(DerivedRow {
+            agent,
+            project_anchor,
+            surface_kind,
+            surface_token,
+            received_at: row.received_at,
+            event_type: row.event_type.clone(),
+            focus_uri: None,
+        });
+    }
+
     // --- Browser path ---
     if row.source == "chrome-extension" {
         // Chrome extension emits the conversation URL in `payload.url`
@@ -541,6 +573,35 @@ mod tests {
         let payload = json!({ "kind": "notification", "url": "https://example.com/" });
         let r = eventrow(9, "chrome-extension", "agent.notified", ctx, payload, 1000);
         assert!(derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default()).is_none());
+    }
+
+    // --- zestful-app (focus.acknowledged + future client-emitted events) ---
+
+    /// Regression: events emitted by the Mac app (source = "zestful-app")
+    /// must carry an explicit (agent, project_anchor, surface_kind,
+    /// surface_token) tuple in `context` so they derive to the SAME tile
+    /// as the event that triggered the user's action. Used so a
+    /// `focus.acknowledged` event the user generates by clicking the
+    /// overlay or the Focus button resolves the open notification on
+    /// that tile (the rule engine sees a newer event with a non-trigger
+    /// type as latest, and unfires).
+    #[test]
+    fn derive_zestful_app_event_uses_explicit_tile_identity_from_context() {
+        let ctx = json!({
+            "agent": "chatgpt-web",
+            "project_anchor": "<chatgpt>",
+            "surface_kind": "browser",
+            "surface_token": "chatgpt",
+        });
+        let payload = json!({ "kind": "focus_acknowledged" });
+        let r = eventrow(200, "zestful-app", "focus.acknowledged", ctx, payload, 1000);
+        let d = derive(&r, &VscodeAttribution::new(), &VscodeRecentFocus::default())
+            .expect("zestful-app events must derive to the explicit tile in context");
+        assert_eq!(d.agent, "chatgpt-web");
+        assert_eq!(d.project_anchor, "<chatgpt>");
+        assert_eq!(d.surface_kind, "browser");
+        assert_eq!(d.surface_token, "chatgpt");
+        assert_eq!(d.event_type, "focus.acknowledged");
     }
 
     // --- vscode ---
