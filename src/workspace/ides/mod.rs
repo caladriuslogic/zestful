@@ -41,6 +41,7 @@ pub fn detect_all() -> Result<Vec<IdeInstance>> {
 /// via the Zestful VS Code extension).
 pub async fn handle_focus(
     app: &str,
+    window_id: Option<&str>,
     project_id: Option<&str>,
     terminal_id: Option<&str>,
 ) -> Result<()> {
@@ -73,7 +74,11 @@ pub async fn handle_focus(
     #[cfg(target_os = "windows")]
     {
         use vscode_family_windows::Family;
-        if lower == "vscode" || lower.contains("visual studio code") {
+        let is_vscode = lower == "vscode" || lower == "code" || lower.contains("visual studio code");
+        if is_vscode {
+            if let Some(wid) = window_id {
+                return vscode_family_windows::focus_by_pid(wid).await;
+            }
             if let Some(tid) = terminal_id {
                 return vscode_family_windows::focus_terminal(Family::VSCode, tid).await;
             }

@@ -35,6 +35,7 @@ pub fn run(app: Option<String>) -> Result<()> {
                 } else if is_ide_app(&p.app) {
                     crate::workspace::ides::handle_focus(
                         &p.app,
+                        p.window_id.as_deref(),
                         p.project_id.as_deref(),
                         p.terminal_id.as_deref(),
                     )
@@ -107,6 +108,7 @@ fn is_browser_app(app: &str) -> bool {
 fn is_ide_app(app: &str) -> bool {
     let lower = app.to_lowercase();
     lower == "vscode"
+        || lower == "code"
         || lower == "cursor"
         || lower == "windsurf"
         || lower == "xcode"

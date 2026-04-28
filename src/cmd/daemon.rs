@@ -220,6 +220,7 @@ async fn handle_focus(Json(req): Json<FocusRequest>) -> impl IntoResponse {
         || parsed.terminal_id.is_some()
         || app_lower == "xcode"
         || app_lower == "vscode"
+        || app_lower == "code"
         || app_lower.contains("visual studio code")
         || app_lower == "cursor"
         || app_lower == "windsurf"
@@ -227,6 +228,7 @@ async fn handle_focus(Json(req): Json<FocusRequest>) -> impl IntoResponse {
     let focus_result = if is_ide {
         ides::handle_focus(
             &parsed.app,
+            parsed.window_id.as_deref(),
             parsed.project_id.as_deref(),
             parsed.terminal_id.as_deref(),
         )

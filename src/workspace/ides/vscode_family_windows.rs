@@ -169,6 +169,25 @@ fn window_folder(win: &Value) -> Option<String> {
     }
 }
 
+/// Focus a VS Code window by process ID. The `window:<n>` segment in
+/// `workspace://code/window:<n>` URIs carries the Node.js PID of the VS Code
+/// extension host (or renderer), not a Win32 HWND. Walk up the parent-process
+/// chain from that PID to the Code.exe ancestor that owns the visible window,
+/// then raise it.
+pub async fn focus_by_pid(window_id: &str) -> Result<()> {
+    let pid: u32 = window_id
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid window pid: {}", window_id))?;
+    tokio::task::spawn_blocking(move || {
+        let hwnd = crate::workspace::win32::find_ancestor_window(pid, "Code.exe");
+        if hwnd != 0 {
+            crate::workspace::win32::raise_window(hwnd);
+        }
+    })
+    .await?;
+    Ok(())
+}
+
 /// Open a URI in the Zestful VS Code extension's URI handler (for terminal focus).
 pub async fn focus_terminal(family: Family, terminal_id: &str) -> Result<()> {
     let url = format!(

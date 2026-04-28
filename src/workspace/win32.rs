@@ -200,6 +200,48 @@ pub fn focus_by_pid(pid: u32) {
     }
 }
 
+/// Walk the parent-process chain starting at `start_pid`, checking at each
+/// Code.exe ancestor whether it owns a visible top-level window. Returns the
+/// first such HWND, or — if none is found along the chain — the window owned
+/// by any Code.exe process as a last-resort fallback.
+///
+/// This is the right primitive for `workspace://code/window:<pid>` URIs where
+/// the embedded number is a Node.js process PID (extension host or renderer),
+/// not a Win32 HWND.
+pub fn find_ancestor_window(start_pid: u32, exe_name: &str) -> HWND {
+    let target = {
+        let t = exe_name.to_lowercase();
+        if t.ends_with(".exe") { t } else { format!("{}.exe", t) }
+    };
+    let proc_map = snapshot_processes();
+
+    let target_pids: HashSet<u32> = proc_map
+        .iter()
+        .filter(|(_, (_, exe))| *exe == target)
+        .map(|(pid, _)| *pid)
+        .collect();
+
+    // Walk up from start_pid; at each Code.exe ancestor try to find its window.
+    let mut cur = start_pid;
+    for _ in 0..8 {
+        if target_pids.contains(&cur) {
+            let mut s = HashSet::new();
+            s.insert(cur);
+            let hwnd = find_visible_window(&s);
+            if hwnd != 0 {
+                return hwnd;
+            }
+        }
+        match proc_map.get(&cur) {
+            Some((ppid, _)) if *ppid != 0 && *ppid != cur => cur = *ppid,
+            _ => break,
+        }
+    }
+
+    // Fallback: any visible window owned by any Code.exe process.
+    find_visible_window(&target_pids)
+}
+
 /// Bring a window to the foreground.
 /// Uses AttachThreadInput to bypass the Windows 11 foreground lock.
 pub fn raise_window(hwnd: HWND) {
