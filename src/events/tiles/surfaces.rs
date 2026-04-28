@@ -20,7 +20,7 @@ pub fn cli_surface_token(
 }
 
 /// Parse a browser URL to extract the conversation slug.
-/// claude.ai/chats/<uuid> → Some("<uuid>")
+/// claude.ai/chat/<uuid> → Some("<uuid>")
 /// chatgpt.com/c/<uuid> or chat.openai.com/c/<uuid> → Some("<uuid>")
 /// gemini.google.com/app/<chatid> → Some("<chatid>")
 /// Anything else (homepage, unknown site, malformed) → None.
@@ -28,7 +28,7 @@ pub fn browser_conversation_slug(url: &str) -> Option<String> {
     let (host, path) = parse_host_and_path(url)?;
     let path_only = path.split(|c| c == '?' || c == '#').next().unwrap_or("");
     match host.as_str() {
-        "claude.ai" => path_only.strip_prefix("/chats/").map(|s| s.trim_end_matches('/').to_string()),
+        "claude.ai" => path_only.strip_prefix("/chat/").map(|s| s.trim_end_matches('/').to_string()),
         "chatgpt.com" | "chat.openai.com" => path_only.strip_prefix("/c/").map(|s| s.trim_end_matches('/').to_string()),
         "gemini.google.com" => path_only.strip_prefix("/app/").map(|s| s.trim_end_matches('/').to_string()),
         _ => None,
@@ -64,6 +64,12 @@ pub fn vscode_surface_token(window_pid: &str) -> String {
 pub fn surface_label(surface_kind: &str, surface_token: &str) -> String {
     match surface_kind {
         "cli" => {
+            // Standalone Codex.app sentinel — produced by tiles::derive's
+            // standalone branch when no recent vscode-extension focus
+            // signal is present.
+            if surface_token == "codex" {
+                return "Codex.app".to_string();
+            }
             if let Some(rest) = surface_token.strip_prefix("tmux:") {
                 if let Some((session, pane_part)) = rest.split_once("/pane:") {
                     let pane = pane_part.strip_prefix('%').unwrap_or(pane_part);
@@ -74,10 +80,23 @@ pub fn surface_label(surface_kind: &str, surface_token: &str) -> String {
                 if let Some((win, tab_part)) = rest.split_once("/tab:") {
                     return format!("iTerm2 window {} / tab {}", win, tab_part);
                 }
+                // Bare "window:<pid>" with no tab — in this codebase this is
+                // the Codex-in-VSCode case. (iTerm2 always emits
+                // window:X/tab:Y; Codex-in-VSCode produces window:<pid>.)
+                return format!("VS Code window {}", rest);
             }
             surface_token.to_string()
         }
         "browser" => {
+            // Per-agent sentinels from tiles::derive — render as the
+            // human-facing website name.
+            match surface_token {
+                "chatgpt" => return "chatgpt.com".to_string(),
+                "claude"  => return "claude.ai".to_string(),
+                "gemini"  => return "gemini.google.com".to_string(),
+                "browser" => return "Browser".to_string(),
+                _ => {}
+            }
             if surface_token.is_empty() {
                 return "conversation".to_string();
             }
@@ -107,6 +126,13 @@ pub fn surface_label(surface_kind: &str, surface_token: &str) -> String {
 /// + "…". None if input is None.
 pub fn project_label(project_anchor: Option<&str>) -> Option<String> {
     let anchor = project_anchor?;
+    // Per-agent sentinels produced by tiles::derive. Each maps to the
+    // user-facing product name.
+    if anchor == "<codex-app>"  { return Some("Codex".to_string()); }
+    if anchor == "<chatgpt>"    { return Some("ChatGPT".to_string()); }
+    if anchor == "<claude-web>" { return Some("Claude".to_string()); }
+    if anchor == "<gemini>"     { return Some("Gemini".to_string()); }
+    if anchor == "<browser>"    { return Some("Browser".to_string()); }
     if anchor.contains('/') || anchor.contains('\\') {
         // Treat as path. Basename, stripping trailing slashes/backslashes.
         let trimmed = anchor.trim_end_matches(['/', '\\']);
@@ -190,7 +216,7 @@ mod tests {
     #[test]
     fn browser_slug_claude_ai() {
         assert_eq!(
-            browser_conversation_slug("https://claude.ai/chats/abc-123-def").as_deref(),
+            browser_conversation_slug("https://claude.ai/chat/abc-123-def").as_deref(),
             Some("abc-123-def")
         );
     }
@@ -239,8 +265,27 @@ mod tests {
     #[test]
     fn browser_slug_strips_query_and_fragment() {
         assert_eq!(
-            browser_conversation_slug("https://claude.ai/chats/abc?ref=email#top").as_deref(),
+            browser_conversation_slug("https://claude.ai/chat/abc?ref=email#top").as_deref(),
             Some("abc")
+        );
+    }
+
+    /// Regression: claude.ai uses /chat/<uuid> (singular), not /chats/<id>
+    /// (plural). Production URLs from the chrome extension look like
+    /// https://claude.ai/chat/715b5cef-7e33-434b-aa6d-d9831ac522b2 — verified
+    /// against events.db on 2026-04-27. Prior fixture used /chats/ which
+    /// silently broke the projection: every claude.ai event returned None
+    /// from browser_conversation_slug, derive() dropped it, and no Claude
+    /// browser tile ever appeared.
+    #[test]
+    fn browser_slug_claude_ai_singular_chat_path() {
+        assert_eq!(
+            browser_conversation_slug(
+                "https://claude.ai/chat/715b5cef-7e33-434b-aa6d-d9831ac522b2"
+            )
+            .as_deref(),
+            Some("715b5cef-7e33-434b-aa6d-d9831ac522b2"),
+            "claude.ai uses /chat/ (singular) in production; /chats/ is wrong"
         );
     }
 
@@ -279,6 +324,16 @@ mod tests {
         assert_eq!(
             surface_label("cli", "window:ttys000/tab:1"),
             "iTerm2 window ttys000 / tab 1"
+        );
+    }
+
+    #[test]
+    fn surface_label_cli_window_only_renders_as_vscode_window() {
+        // Bare window:<pid> token (no /tab:) is produced only by the
+        // Codex-in-VSCode routing path. iTerm2 always emits window:X/tab:Y.
+        assert_eq!(
+            surface_label("cli", "window:80836"),
+            "VS Code window 80836"
         );
     }
 
@@ -346,7 +401,7 @@ mod tests {
     fn browser_slug_with_port_in_url() {
         // Port should be stripped from host so the match arm fires.
         assert_eq!(
-            browser_conversation_slug("https://claude.ai:443/chats/abc-123").as_deref(),
+            browser_conversation_slug("https://claude.ai:443/chat/abc-123").as_deref(),
             Some("abc-123")
         );
     }
@@ -367,5 +422,18 @@ mod tests {
     fn surface_label_vscode_empty_pid() {
         // Defensive: empty pid in vscode-window: shouldn't produce trailing space.
         assert_eq!(surface_label("vscode", "vscode-window:"), "VS Code window (unknown)");
+    }
+
+    #[test]
+    fn surface_label_cli_codex_renders_as_codex_app() {
+        assert_eq!(surface_label("cli", "codex"), "Codex.app");
+    }
+
+    #[test]
+    fn project_label_codex_app_anchor_renders_as_codex() {
+        assert_eq!(
+            project_label(Some("<codex-app>")).as_deref(),
+            Some("Codex")
+        );
     }
 }

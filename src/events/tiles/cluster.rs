@@ -194,6 +194,6 @@ mod tests {
         let rows = vec![dr("claude-code", "/x/Fubar", "tmux:z/pane:%0", "cli", 1000, "e")];
         let tiles = group(&rows);
         assert_eq!(tiles[0].project_label.as_deref(), Some("Fubar"));
-        assert!(tiles[0].surface_label.contains("tmux z"), "label = {}", tiles[0].surface_label);
+        assert!(tiles[0].surface_label.contains("tmux [z:"), "label = {}", tiles[0].surface_label);
     }
 }

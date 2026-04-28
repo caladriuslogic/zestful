@@ -137,6 +137,25 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Read the notifications projection from the local event store.
+    Notifications {
+        /// Filter to a single agent slug.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Filter to a single rule id (e.g. agent_completed).
+        #[arg(long)]
+        rule: Option<String>,
+        /// Minimum severity (info | warn | urgent).
+        #[arg(long)]
+        severity: Option<String>,
+        /// Override default 24h window (unix ms lower bound).
+        #[arg(long)]
+        since: Option<i64>,
+        /// Print JSON instead of the human table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -152,6 +171,7 @@ fn main() -> anyhow::Result<()> {
             | Commands::Hook { .. }
             | Commands::Events { .. }
             | Commands::Tiles { .. }
+            | Commands::Notifications { .. }
     ) {
         config::ensure_daemon();
     }
@@ -188,5 +208,13 @@ fn main() -> anyhow::Result<()> {
         Commands::Events { command } => cmd::events::run(command),
 
         Commands::Tiles { agent, since, json } => cmd::tiles::run(agent, since, json),
+
+        Commands::Notifications {
+            agent,
+            rule,
+            severity,
+            since,
+            json,
+        } => cmd::notifications::run(agent, rule, severity, since, json),
     }
 }

@@ -24,7 +24,7 @@ pub fn compute(conn: &Connection, since_ms: i64) -> rusqlite::Result<Vec<tile::T
 
 /// Fetch all events with received_at >= since_ms, ordered ASC by
 /// received_at, then by id ASC for stable tiebreaking.
-fn fetch_since(conn: &Connection, since_ms: i64) -> rusqlite::Result<Vec<EventRow>> {
+pub(crate) fn fetch_since(conn: &Connection, since_ms: i64) -> rusqlite::Result<Vec<EventRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, received_at, event_id, event_type, source, session_id, project,
                 host, os_user, device_id, event_ts, seq, source_pid, schema_version,
@@ -76,8 +76,9 @@ fn fetch_since(conn: &Connection, since_ms: i64) -> rusqlite::Result<Vec<EventRo
 /// view per window" map; for each row, update the map if it's a
 /// view.visible event, then call derive() with the current map state.
 /// Returns all DerivedRows that successfully derived.
-fn walk_and_derive(rows: &[EventRow]) -> Vec<derive::DerivedRow> {
+pub(crate) fn walk_and_derive(rows: &[EventRow]) -> Vec<derive::DerivedRow> {
     let mut active_views = derive::VscodeAttribution::new();
+    let mut recent_focus = derive::VscodeRecentFocus::default();
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         if let Some((window_pid, view, visible)) = derive::parse_view_visible_change(row) {
@@ -87,7 +88,14 @@ fn walk_and_derive(rows: &[EventRow]) -> Vec<derive::DerivedRow> {
                 active_views.remove(&window_pid);
             }
         }
-        if let Some(d) = derive::derive(row, &active_views) {
+        if let Some((window_pid, workspace_root, ts_ms)) = derive::parse_vscode_focus_signal(row) {
+            recent_focus = derive::VscodeRecentFocus {
+                ts_ms: Some(ts_ms),
+                window_pid: Some(window_pid),
+                workspace_root: Some(workspace_root),
+            };
+        }
+        if let Some(d) = derive::derive(row, &active_views, &recent_focus) {
             out.push(d);
         }
     }
@@ -178,6 +186,60 @@ mod tests {
         assert_eq!(derived.len(), 1);
         assert_eq!(derived[0].agent, "vscode+openai.chatgpt");
         assert_eq!(derived[0].received_at, 1000);
+    }
+
+    fn codex_event(id: i64, ts: i64) -> EventRow {
+        er(
+            id,
+            "codex",
+            "turn.completed",
+            json!({ "agent": "codex", "cwd": "/Users/x/Documents/Codex/abc" }),
+            json!({}),
+            ts,
+        )
+    }
+
+    #[test]
+    fn walk_and_derive_codex_with_concurrent_vscode_focus_attributes_to_vscode() {
+        // vscode_window_focused has no entry in active_views map so it doesn't
+        // derive a tile itself, but it does update recent_focus. The codex event
+        // that follows within 5s is attributed to that VS Code window.
+        let rows = vec![
+            vscode_window_focused(1, "80836", "/x/zestful", 1_000),
+            codex_event(2, 2_000),
+        ];
+        let derived = walk_and_derive(&rows);
+        // Only the codex event derives (the window.focused event has no view in
+        // the active_views map so derive() returns None for it).
+        assert_eq!(derived.len(), 1);
+        let codex_row = derived.iter().find(|d| d.agent == "codex")
+            .expect("codex row");
+        assert_eq!(codex_row.project_anchor, "/x/zestful");
+        assert_eq!(codex_row.surface_token, "window:80836");
+    }
+
+    #[test]
+    fn walk_and_derive_codex_alone_attributes_to_standalone() {
+        let rows = vec![codex_event(1, 1_000)];
+        let derived = walk_and_derive(&rows);
+        assert_eq!(derived.len(), 1);
+        assert_eq!(derived[0].agent, "codex");
+        assert_eq!(derived[0].project_anchor, "<codex-app>");
+        assert_eq!(derived[0].surface_token, "codex");
+    }
+
+    #[test]
+    fn walk_and_derive_two_codex_events_one_correlated_one_not() {
+        let rows = vec![
+            vscode_window_focused(1, "80836", "/x/zestful", 0),
+            codex_event(2, 2_000),     // correlated (within 5s of focus)
+            codex_event(3, 32_000),    // uncorrelated (focus is 32s old)
+        ];
+        let derived = walk_and_derive(&rows);
+        let codex_rows: Vec<_> = derived.iter().filter(|d| d.agent == "codex").collect();
+        assert_eq!(codex_rows.len(), 2);
+        assert_eq!(codex_rows[0].project_anchor, "/x/zestful");        // correlated
+        assert_eq!(codex_rows[1].project_anchor, "<codex-app>");       // standalone
     }
 
     #[test]

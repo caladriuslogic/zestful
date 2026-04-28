@@ -341,6 +341,21 @@ async fn handle_events(
             crate::events::store::DEFAULT_MAX_BYTES,
         );
 
+        // Broadcast "projection changed" to any /stream subscribers.
+        // One frame per event (batches produce one frame per envelope).
+        let event_type = env.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        crate::events::broadcast::send(
+            crate::events::broadcast::ProjectionChangedFrame {
+                source_event_types: vec![event_type],
+                ts: now_ms,
+                reason: None,
+            }
+        );
+
         let type_ = env.get("type").and_then(|v| v.as_str()).unwrap_or("?");
         let id = env.get("id").and_then(|v| v.as_str()).unwrap_or("?");
         let source = env.get("source").and_then(|v| v.as_str()).unwrap_or("?");
@@ -527,6 +542,237 @@ async fn handle_tiles(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct LogEntry {
+    ts: i64,
+    component: String,
+    level: String,
+    message: String,
+}
+
+async fn handle_log(
+    headers: axum::http::HeaderMap,
+    body: axum::extract::Json<Vec<LogEntry>>,
+) -> impl axum::response::IntoResponse {
+    // Same X-Zestful-Token gate as /events, /tiles, /notifications, /stream.
+    let expected = config::read_token();
+    let got = headers
+        .get("x-zestful-token")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    match (expected, got) {
+        (Some(e), Some(g)) if e == g => {}
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid token"})),
+            )
+                .into_response();
+        }
+    }
+
+    let entries = body.0;
+    for entry in &entries {
+        // Strip embedded newlines so a multi-line message (e.g., a JS
+        // exception with a stack trace) can't corrupt the one-line-per-
+        // entry log format.
+        let component = entry.component.replace(['\n', '\r'], " ");
+        let message = entry.message.replace(['\n', '\r'], " ");
+        crate::log::log_with_ts(
+            entry.ts,
+            &component,
+            &format!("{}: {}", entry.level, message),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"accepted": entries.len()})),
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct NotificationsQuery {
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    rule: Option<String>,
+    #[serde(default)]
+    severity: Option<String>,
+    #[serde(default)]
+    since: Option<i64>,
+}
+
+async fn handle_notifications(
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<NotificationsQuery>,
+) -> impl axum::response::IntoResponse {
+    // Same token gate as /events and /tiles.
+    let expected = config::read_token();
+    let got = headers
+        .get("x-zestful-token")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    match (expected, got) {
+        (Some(e), Some(g)) if e == g => {}
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid token"})),
+            )
+                .into_response();
+        }
+    }
+
+    // Validate severity param before doing any work.
+    let min_severity_rank: Option<u8> = match &q.severity {
+        Some(s) => match s.to_ascii_lowercase().as_str() {
+            "info" => Some(0),
+            "warn" => Some(1),
+            "urgent" => Some(2),
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid severity",
+                        "detail": "expected info|warn|urgent",
+                    })),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let since_ms = q.since.unwrap_or(now_ms - 24 * 3_600_000);
+    let agent_filter = q.agent;
+    let rule_filter = q.rule;
+
+    let result = tokio::task::spawn_blocking(move || {
+        let c = crate::events::store::conn().lock().unwrap();
+        crate::events::notifications::compute(&c, since_ms)
+    })
+    .await
+    .expect("notifications compute task panicked");
+
+    match result {
+        Ok(mut notifications) => {
+            if let Some(a) = agent_filter {
+                notifications.retain(|n| n.agent == a);
+            }
+            if let Some(r) = rule_filter {
+                notifications.retain(|n| n.rule_id == r);
+            }
+            if let Some(min) = min_severity_rank {
+                notifications.retain(|n| {
+                    let rank = match n.severity {
+                        crate::events::notifications::rule::Severity::Info => 0u8,
+                        crate::events::notifications::rule::Severity::Warn => 1,
+                        crate::events::notifications::rule::Severity::Urgent => 2,
+                    };
+                    rank >= min
+                });
+            }
+            let window_hours = ((now_ms - since_ms).max(0) / 3_600_000) as i64;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "notifications": notifications,
+                    "window_hours": window_hours,
+                    "computed_at": now_ms,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "query failed",
+                "detail": e.to_string(),
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn handle_stream(
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    // Same token gate as /events, /tiles, /notifications.
+    let expected = config::read_token();
+    let got = headers
+        .get("x-zestful-token")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    match (expected, got) {
+        (Some(e), Some(g)) if e == g => {}
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid token"})),
+            )
+                .into_response();
+        }
+    }
+
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::stream::{self, StreamExt as _};
+    use tokio_stream::wrappers::BroadcastStream;
+
+    // Synthetic initial frame so the client does one refetch on connect
+    // without special-casing startup.
+    let initial = crate::events::broadcast::ProjectionChangedFrame {
+        source_event_types: Vec::new(),
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0),
+        reason: Some("initial".to_string()),
+    };
+    let initial_event = Event::default()
+        .event("projection.changed")
+        .data(serde_json::to_string(&initial).unwrap_or_default());
+    let initial_stream = stream::once(async move {
+        Ok::<_, std::convert::Infallible>(initial_event)
+    });
+
+    // Live stream from the broadcast channel.
+    let rx = crate::events::broadcast::sender().subscribe();
+    let live = BroadcastStream::new(rx).map(|r| match r {
+        Ok(frame) => Ok::<_, std::convert::Infallible>(
+            Event::default()
+                .event("projection.changed")
+                .data(serde_json::to_string(&frame).unwrap_or_default()),
+        ),
+        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(_n)) => {
+            // Subscriber fell behind. Send a catchup frame so the client
+            // refetches and moves on.
+            let catchup = crate::events::broadcast::ProjectionChangedFrame {
+                source_event_types: Vec::new(),
+                ts: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+                reason: Some("catchup".to_string()),
+            };
+            Ok(Event::default()
+                .event("projection.changed")
+                .data(serde_json::to_string(&catchup).unwrap_or_default()))
+        }
+    });
+
+    let full = initial_stream.chain(live);
+
+    Sse::new(full)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
+}
+
 /// Validate an envelope JSON per spec §Daemon validation rules. Returns
 /// `Err(detail)` on failure. Payload shapes are NOT validated — unknown types
 /// are accepted for forward-compat.
@@ -591,6 +837,9 @@ fn build_router() -> Router {
                 .layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .route("/tiles", get(handle_tiles).layer(DefaultBodyLimit::max(16_384)))
+        .route("/notifications", get(handle_notifications).layer(DefaultBodyLimit::max(16_384)))
+        .route("/stream", get(handle_stream))
+        .route("/log", post(handle_log).layer(DefaultBodyLimit::max(64 * 1024)))
 }
 
 async fn shutdown_signal(pid_file: std::path::PathBuf) {
@@ -1361,6 +1610,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn events_post_triggers_broadcast_frame() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+
+        let mut rx = crate::events::broadcast::sender().subscribe();
+
+        let body = serde_json::to_string(&canned_envelope()).unwrap();
+        let resp = send_events_request(&body, Some("test-token")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("no frame within 2s")
+            .expect("recv err");
+        // canned_envelope produces type = "turn.completed"
+        assert_eq!(frame.source_event_types, vec!["turn.completed"]);
+    }
+
+    #[tokio::test]
+    async fn stream_laggy_subscriber_recovers() {
+        // Fill the broadcast ring past capacity (16) BEFORE subscribing so
+        // the new subscriber is lagged on first recv. Verify no deadlock —
+        // first recv should surface Lagged, subsequent ones fresh frames.
+        for i in 0..32 {
+            crate::events::broadcast::send(
+                crate::events::broadcast::ProjectionChangedFrame {
+                    source_event_types: vec![format!("lag.{}", i)],
+                    ts: i,
+                    reason: None,
+                },
+            );
+        }
+        let mut rx = crate::events::broadcast::sender().subscribe();
+        // Send one more frame after subscribing.
+        crate::events::broadcast::send(
+            crate::events::broadcast::ProjectionChangedFrame {
+                source_event_types: vec!["post-subscribe".into()],
+                ts: 999,
+                reason: None,
+            },
+        );
+
+        let recv1 = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            rx.recv(),
+        )
+        .await
+        .expect("recv timeout");
+        // Either we get a fresh Ok frame (no lag surfaced), or Lagged (our
+        // case if we were truly behind by >capacity). Both are acceptable;
+        // the point is no deadlock.
+        match recv1 {
+            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            Err(other) => panic!("unexpected recv error: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_endpoint_401_without_token() {
+        let _home = HomeGuard::new();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/stream")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn stream_endpoint_returns_text_event_stream() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+        let req = Request::builder()
+            .method("GET")
+            .uri("/stream")
+            .header("x-zestful-token", "test-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ctype = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            ctype.starts_with("text/event-stream"),
+            "content-type = {}",
+            ctype
+        );
+    }
+
+    #[tokio::test]
+    async fn notifications_endpoint_401_without_token() {
+        let _home = HomeGuard::new();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/notifications")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn notifications_endpoint_ok_with_auth() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+        let req = Request::builder()
+            .method("GET")
+            .uri("/notifications")
+            .header("x-zestful-token", "test-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn notifications_endpoint_rejects_invalid_severity() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+        let req = Request::builder()
+            .method("GET")
+            .uri("/notifications?severity=critical")
+            .header("x-zestful-token", "test-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn test_get_tiles_default_window_excludes_old_events_since_zero_includes() {
         let _home = HomeGuard::new();
         set_test_token("tok-tiles-5");
@@ -1443,6 +1827,118 @@ mod tests {
         assert!(
             wide_tiles.iter().any(|t| t["project_anchor"].as_str() == Some("/x-old-event-test")),
             "since=0 should INCLUDE backdated event"
+        );
+    }
+
+    #[tokio::test]
+    async fn log_endpoint_403_without_token() {
+        let _home = HomeGuard::new();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/log")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"[{"ts":1,"component":"chrome-ext:sw","level":"info","message":"hi"}]"#))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn log_endpoint_accepts_valid_batch_and_writes_lines() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+
+        let body = r#"[
+            {"ts":1700000000001,"component":"chrome-ext:sw","level":"info","message":"hello"},
+            {"ts":1700000000002,"component":"chrome-ext:content/chatgpt","level":"warn","message":"x"}
+        ]"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/log")
+            .header("content-type", "application/json")
+            .header("x-zestful-token", "test-token")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let log_path = crate::config::config_dir().join("zestful.log");
+        let contents = std::fs::read_to_string(&log_path).expect("log file should exist after POST /log");
+        assert!(
+            contents.contains("[chrome-ext:sw] info: hello"),
+            "expected SW info line; got log:\n{}",
+            contents
+        );
+        assert!(
+            contents.contains("[chrome-ext:content/chatgpt] warn: x"),
+            "expected content-script warn line; got log:\n{}",
+            contents
+        );
+        assert!(
+            contents.contains("2023-11-14T") && contents.contains(".001 [chrome-ext:sw]"),
+            "expected per-entry ts to drive the line prefix; got log:\n{}",
+            contents
+        );
+    }
+
+    #[tokio::test]
+    async fn log_endpoint_rejects_malformed_json() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/log")
+            .header("content-type", "application/json")
+            .header("x-zestful-token", "test-token")
+            .body(Body::from(r#"{"not":"an array"}"#))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert!(
+            resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::UNPROCESSABLE_ENTITY,
+            "expected 400 or 422 for malformed body; got {}",
+            resp.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn log_endpoint_strips_embedded_newlines() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token");
+
+        // Multi-line message simulating a JS stack trace.
+        let body = r#"[
+            {"ts":1700000000003,"component":"chrome-ext:content/chatgpt","level":"error","message":"Bridge error: TypeError: x is undefined\n    at foo (bar.js:1:2)\n    at baz (qux.js:3:4)"}
+        ]"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/log")
+            .header("content-type", "application/json")
+            .header("x-zestful-token", "test-token")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let log_path = crate::config::config_dir().join("zestful.log");
+        let contents = std::fs::read_to_string(&log_path).expect("log file should exist");
+
+        // The single entry must produce exactly one log line — newlines
+        // inside `message` get replaced with spaces.
+        let zestful_lines: Vec<&str> = contents
+            .lines()
+            .filter(|l| l.contains("[chrome-ext:content/chatgpt]"))
+            .collect();
+        assert_eq!(
+            zestful_lines.len(),
+            1,
+            "expected exactly one log line for a multi-line message; got:\n{}",
+            contents
+        );
+        assert!(
+            zestful_lines[0].contains("at foo (bar.js:1:2)"),
+            "expected stack trace content preserved on the same line; got: {}",
+            zestful_lines[0]
         );
     }
 }

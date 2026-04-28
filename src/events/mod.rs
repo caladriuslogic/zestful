@@ -5,6 +5,7 @@
 //! propagate to callers.
 
 pub mod backend_forwarder;
+pub mod broadcast;
 pub mod device;
 pub mod env_capture;
 pub mod envelope;
@@ -12,6 +13,7 @@ pub mod map;
 pub mod payload;
 pub mod preview;
 pub mod send;
+pub mod notifications;
 pub mod store;
 pub mod tiles;
 

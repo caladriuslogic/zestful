@@ -24,9 +24,8 @@ const MESSAGE_MAX: usize = 1024;
 /// unknown event that produces a fallback.
 ///
 /// `focus_uri` is the `workspace://…` URI already computed by the caller
-/// (e.g. `cmd/hook.rs`), including any codex-editor or synthesised-project
-/// fallback. Passing `None` produces a context with no `application` or
-/// `application_instance` fields.
+/// (e.g. `cmd/hook.rs`). Passing `None` produces a context with no
+/// `application` or `application_instance` fields.
 pub fn map_hook_payload(
     agent: AgentKind,
     payload: &Value,
@@ -813,4 +812,5 @@ mod tests {
         assert_eq!(ctx.application.as_deref(), Some("codex"));
         assert_eq!(ctx.application_instance, None);
     }
+
 }
