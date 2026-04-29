@@ -64,9 +64,15 @@ pub fn run(agent: String, command: Vec<String>) -> Result<()> {
         &agent_name,
         &message,
         severity,
-        terminal_uri,
+        terminal_uri.clone(),
         false,
     );
+
+    // Also emit a structured event to the daemon. Best-effort, mirrors notify::run.
+    let envelopes = crate::events::map_cli_notify(&agent_name, &message, terminal_uri);
+    if let Err(e) = crate::events::send_to_daemon(&envelopes) {
+        crate::log::log("watch", &format!("event emission failed: {}", e));
+    }
 
     std::process::exit(exit_code);
 }
