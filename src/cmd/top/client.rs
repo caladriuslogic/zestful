@@ -1,0 +1,232 @@
+//! Network-only client of the daemon's HTTP+SSE API. Pure I/O — knows
+//! nothing about ratatui or AppState. Used by `mod.rs`'s event loop.
+
+use crate::events::tiles::tile::Tile;
+use crate::events::notifications::notification::Notification;
+use crate::events::store::query::EventRow;
+use anyhow::{anyhow, Context, Result};
+use serde::Deserialize;
+use std::time::Duration;
+
+const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Deserialize)]
+pub struct TilesResponse {
+    pub tiles: Vec<Tile>,
+    #[serde(default)]
+    pub window_hours: i64,
+    #[serde(default)]
+    pub computed_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NotificationsResponse {
+    pub notifications: Vec<Notification>,
+    #[serde(default)]
+    pub window_hours: i64,
+    #[serde(default)]
+    pub computed_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventsResponse {
+    pub events: Vec<EventRow>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub has_more: bool,
+}
+
+pub struct Client {
+    base_url: String,   // e.g. "http://127.0.0.1:21548"
+    token: String,
+    http: reqwest::Client,
+}
+
+impl Client {
+    /// Construct from the standard config locations.
+    pub fn from_config() -> Result<Self> {
+        let token = crate::config::read_token()
+            .ok_or_else(|| anyhow!("token not found at ~/.config/zestful/local-token. Is the Zestful app running?"))?;
+        let port = crate::config::daemon_port();
+        Self::new(&format!("http://127.0.0.1:{}", port), &token)
+    }
+
+    pub fn new(base_url: &str, token: &str) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            .context("building reqwest client")?;
+        Ok(Self {
+            base_url: base_url.to_string(),
+            token: token.to_string(),
+            http,
+        })
+    }
+
+    pub fn base_url(&self) -> &str { &self.base_url }
+    pub fn token(&self) -> &str { &self.token }
+
+    pub async fn tiles(&self, since_ms: i64) -> Result<Vec<Tile>> {
+        let resp = self.http
+            .get(format!("{}/tiles", self.base_url))
+            .header("X-Zestful-Token", &self.token)
+            .query(&[("since", since_ms.to_string())])
+            .send().await
+            .context("GET /tiles")?;
+        check_status(&resp).await?;
+        let body: TilesResponse = resp.json().await.context("parsing /tiles JSON")?;
+        Ok(body.tiles)
+    }
+
+    pub async fn notifications(&self, since_ms: i64) -> Result<Vec<Notification>> {
+        let resp = self.http
+            .get(format!("{}/notifications", self.base_url))
+            .header("X-Zestful-Token", &self.token)
+            .query(&[("since", since_ms.to_string())])
+            .send().await
+            .context("GET /notifications")?;
+        check_status(&resp).await?;
+        let body: NotificationsResponse = resp.json().await.context("parsing /notifications JSON")?;
+        Ok(body.notifications)
+    }
+
+    pub async fn events_for_agent(&self, agent: &str, since_ms: i64, limit: usize) -> Result<Vec<EventRow>> {
+        let resp = self.http
+            .get(format!("{}/events", self.base_url))
+            .header("X-Zestful-Token", &self.token)
+            .query(&[
+                ("agent", agent.to_string()),
+                ("since", since_ms.to_string()),
+                ("limit", limit.to_string()),
+            ])
+            .send().await
+            .context("GET /events")?;
+        check_status(&resp).await?;
+        let body: EventsResponse = resp.json().await.context("parsing /events JSON")?;
+        Ok(body.events)
+    }
+
+    pub async fn post_focus(&self, terminal_uri: &str) -> Result<()> {
+        let resp = self.http
+            .post(format!("{}/focus", self.base_url))
+            .json(&serde_json::json!({ "terminal_uri": terminal_uri }))
+            .send().await
+            .context("POST /focus")?;
+        check_status(&resp).await?;
+        Ok(())
+    }
+}
+
+async fn check_status(resp: &reqwest::Response) -> Result<()> {
+    let status = resp.status();
+    if status.is_success() { return Ok(()); }
+    Err(anyhow!("daemon responded {}", status))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Router;
+    use tokio::net::TcpListener;
+
+    async fn spawn_test_daemon(router: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        format!("http://{}", addr)
+    }
+
+    fn fake_tile_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": "tile_abc",
+            "agent": "claude-code",
+            "project_anchor": "/x/zestful",
+            "project_label": "zestful",
+            "surface_kind": "cli",
+            "surface_token": "tmux:z/pane:%0",
+            "surface_label": "tmux [z:0]",
+            "first_seen_at": 100,
+            "last_seen_at": 200,
+            "event_count": 42,
+            "latest_event_type": "turn.completed",
+            "focus_uri": "workspace://iterm2/window:1/tab:1"
+        })
+    }
+
+    #[tokio::test]
+    async fn tiles_parses_realistic_response() {
+        // Build a stub router that returns a canned /tiles response.
+        let router = Router::new().route("/tiles", axum::routing::get(|| async {
+            axum::Json(serde_json::json!({
+                "tiles": [super::tests::fake_tile_json()],
+                "window_hours": 24,
+                "computed_at": 1234567890i64,
+            }))
+        }));
+        let url = spawn_test_daemon(router).await;
+        let c = Client::new(&url, "ignored-token").unwrap();
+        let tiles = c.tiles(0).await.unwrap();
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].agent, "claude-code");
+        assert_eq!(tiles[0].event_count, 42);
+        assert_eq!(tiles[0].focus_uri.as_deref(), Some("workspace://iterm2/window:1/tab:1"));
+    }
+
+    #[tokio::test]
+    async fn tiles_403_returns_err() {
+        let router = Router::new().route("/tiles", axum::routing::get(|| async {
+            (axum::http::StatusCode::FORBIDDEN, axum::Json(serde_json::json!({"error":"invalid token"})))
+        }));
+        let url = spawn_test_daemon(router).await;
+        let c = Client::new(&url, "wrong").unwrap();
+        let err = c.tiles(0).await.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("403"), "expected 403 in error, got: {}", msg);
+    }
+
+    #[tokio::test]
+    async fn post_focus_with_terminal_uri_succeeds() {
+        let router = Router::new().route("/focus", axum::routing::post(|axum::Json(v): axum::Json<serde_json::Value>| async move {
+            assert_eq!(v["terminal_uri"], "workspace://x");
+            axum::Json(serde_json::json!({"status":"focused"}))
+        }));
+        let url = spawn_test_daemon(router).await;
+        let c = Client::new(&url, "x").unwrap();
+        c.post_focus("workspace://x").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn post_focus_400_returns_err() {
+        let router = Router::new().route("/focus", axum::routing::post(|| async {
+            (axum::http::StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({"error":"missing"})))
+        }));
+        let url = spawn_test_daemon(router).await;
+        let c = Client::new(&url, "x").unwrap();
+        c.post_focus("").await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn events_for_agent_parses_response() {
+        let router = Router::new().route("/events", axum::routing::get(|| async {
+            axum::Json(serde_json::json!({
+                "events": [{
+                    "id": 1, "received_at": 0, "event_id": "e1", "event_type": "turn.completed",
+                    "source": "hook", "session_id": null, "project": "zestful",
+                    "host": "h", "os_user": "u", "device_id": "d",
+                    "event_ts": 100, "seq": 0, "source_pid": 0, "schema_version": 1,
+                    "correlation": null, "context": null, "payload": null
+                }],
+                "next_cursor": null,
+                "has_more": false
+            }))
+        }));
+        let url = spawn_test_daemon(router).await;
+        let c = Client::new(&url, "x").unwrap();
+        let evs = c.events_for_agent("claude-code", 0, 50).await.unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].event_type, "turn.completed");
+    }
+}

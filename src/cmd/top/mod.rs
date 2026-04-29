@@ -2,6 +2,7 @@
 //! HTTP+SSE API. See spec: docs/superpowers/specs/2026-04-29-zestful-top-tui-design.md.
 
 mod app;
+mod client;
 mod colors;
 mod keys;
 
