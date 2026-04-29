@@ -5,6 +5,7 @@
 pub mod agent_completed;
 pub mod agent_notified;
 pub mod permission_pending;
+pub mod watch_completed;
 
 use crate::events::notifications::rule::Rule;
 
@@ -12,4 +13,5 @@ pub static ALL_RULES: &[&dyn Rule] = &[
     &agent_completed::AgentCompleted,
     &agent_notified::AgentNotified,
     &permission_pending::PermissionPending,
+    &watch_completed::WatchCompleted,
 ];
