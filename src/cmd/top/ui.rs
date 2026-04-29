@@ -30,6 +30,7 @@ pub fn draw(f: &mut Frame, state: &AppState) {
     draw_tiles_list(f, body_chunks[0], state);
     draw_detail_pane(f, body_chunks[1], state);
     draw_status_bar(f, chunks[2], state);
+    draw_help_overlay(f, state);
 }
 
 pub fn draw_header(f: &mut Frame, area: Rect, _state: &AppState) {
@@ -86,8 +87,55 @@ pub fn draw_status_bar(f: &mut Frame, area: Rect, state: &AppState) {
     f.render_widget(Paragraph::new(right).alignment(ratatui::layout::Alignment::Right), cols[1]);
 }
 
+pub fn draw_help_overlay(f: &mut Frame, state: &AppState) {
+    use crate::cmd::top::keys::HELP;
+    if !state.help_open { return; }
+    let area = f.area();
+
+    // Centered modal — 70% wide, 75% tall (capped to content needs).
+    let w = (area.width as f32 * 0.70) as u16;
+    let h = ((HELP.len() as u16) + 6).min((area.height as f32 * 0.75) as u16);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let modal = Rect::new(x, y, w, h);
+
+    // Dim backdrop — clear under the modal so border draws cleanly.
+    f.render_widget(ratatui::widgets::Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BRAND_ORANGE))
+        .title(Span::styled(" Help ", Style::default().add_modifier(Modifier::BOLD)));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    // Group rows by section.
+    let mut lines: Vec<Line> = Vec::new();
+    let mut last_section: &str = "";
+    for row in HELP {
+        if row.section != last_section {
+            if !last_section.is_empty() { lines.push(Line::from("")); }
+            lines.push(Line::from(Span::styled(
+                row.section.to_string(),
+                Style::default().fg(BRAND_ORANGE).add_modifier(Modifier::BOLD),
+            )));
+            last_section = row.section;
+        }
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<16}", row.keys), Style::default().fg(Color::White)),
+            Span::raw("  "),
+            Span::styled(row.description.to_string(), Style::default().fg(Color::Gray)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  ?  or  Esc  to close",
+        Style::default().fg(Color::DarkGray),
+    )));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 // Used by later tasks — placeholder so subsequent tasks compile.
-pub fn draw_help_overlay(_f: &mut Frame, _state: &AppState) { /* Task 10 */ }
 pub fn draw_empty_state(_f: &mut Frame, _area: Rect, _state: &AppState) { /* Task 9/10 */ }
 
 pub fn draw_tiles_list(f: &mut Frame, area: Rect, state: &AppState) {
@@ -379,5 +427,35 @@ mod tests {
             if row.contains("tmux:z/pane:%0") { found = true; break; }
         }
         assert!(found, "expected surface_label in detail pane");
+    }
+
+    #[test]
+    fn help_overlay_lists_every_section() {
+        let mut state = AppState::new();
+        state.help_open = true;
+        let buf = render(&state, 100, 30);
+        // Concat the entire buffer into a single string.
+        let mut all = String::new();
+        for y in 0..30 {
+            for x in 0..100 { all.push_str(buf.cell((x, y)).unwrap().symbol()); }
+            all.push('\n');
+        }
+        assert!(all.contains("Navigation"));
+        assert!(all.contains("Actions"));
+        assert!(all.contains("Display"));
+        assert!(all.contains("Enter"));
+        assert!(all.contains("focus the selected tile"));
+    }
+
+    #[test]
+    fn help_overlay_hidden_when_help_open_false() {
+        let state = AppState::new();
+        let buf = render(&state, 100, 30);
+        let mut all = String::new();
+        for y in 0..30 {
+            for x in 0..100 { all.push_str(buf.cell((x, y)).unwrap().symbol()); }
+            all.push('\n');
+        }
+        assert!(!all.contains("Navigation"), "help should be hidden");
     }
 }
