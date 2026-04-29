@@ -125,8 +125,10 @@ pub fn draw_tiles_list(f: &mut Frame, area: Rect, state: &AppState) {
     let mut lines: Vec<Line> = Vec::with_capacity(visible.len());
     for (idx, t) in visible.iter().enumerate() {
         let cursor = if idx == state.selected { "▶ " } else { "  " };
+        // Generic "has notifications" indicator — amber-400, NOT brand orange
+        // (chrome-vs-state rule: brand orange is reserved for chrome only).
         let glyph = if notif_ids.contains(t.id.as_str()) {
-            Span::styled(" ⚠", Style::default().fg(Color::Rgb(0xF5, 0x9E, 0x0A)))
+            Span::styled(" ⚠", Style::default().fg(colors::severity_color(&crate::events::notifications::rule::Severity::Warn)))
         } else {
             Span::raw("  ")
         };
@@ -218,7 +220,7 @@ pub fn draw_detail_pane(f: &mut Frame, area: Rect, state: &AppState) {
             let when = relative_time(n.triggered_at_ms, now);
             lines.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(glyph, Style::default().fg(Color::Rgb(0xF5, 0x9E, 0x0A))),
+                Span::styled(glyph, Style::default().fg(colors::severity_color(&n.severity))),
                 Span::raw(format!("  {}  ", n.message)),
                 Span::styled(when, Style::default().fg(Color::DarkGray)),
             ]));
