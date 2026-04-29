@@ -5,6 +5,8 @@
 
 use ratatui::style::Color;
 
+use crate::events::notifications::rule::Severity;
+
 /// Zestful brand orange (`#F59E0A`). Primary chrome accent: title bar,
 /// brand mark background, focused-pane border, filter mode indicator.
 pub const BRAND_ORANGE: Color = Color::Rgb(0xF5, 0x9E, 0x0A);
@@ -39,9 +41,10 @@ pub fn agent_color(agent: &str) -> Color {
 
 fn agent_color_index(agent: &str) -> usize {
     use std::hash::{Hash, Hasher};
-    // SipHasher / DefaultHasher is stable across runs in the same Rust
-    // version + std lib. For our purpose ("don't flip on every keystroke")
-    // that's enough. We don't need cross-version stability.
+    // DefaultHasher is unspecified across Rust versions and may change.
+    // We only need within-process stability — same agent string maps to
+    // the same color for the lifetime of one `zestful top` run, so a
+    // restart picking a different hue is acceptable.
     let mut h = std::collections::hash_map::DefaultHasher::new();
     agent.hash(&mut h);
     (h.finish() as usize) % AGENT_PALETTE.len()
@@ -51,7 +54,7 @@ fn agent_color_index(agent: &str) -> usize {
 pub fn connection_color(state: ConnectionState) -> Color {
     match state {
         ConnectionState::Live         => Color::Rgb(0x10, 0xB9, 0x81), // emerald-500
-        ConnectionState::Reconnecting => Color::Rgb(0xF5, 0x9E, 0x0A), // amber-500 (yellow-orange)
+        ConnectionState::Reconnecting => Color::Rgb(0xEA, 0xB3, 0x08), // yellow-500
         ConnectionState::Offline      => Color::Rgb(0xEF, 0x44, 0x44), // red-500
     }
 }
@@ -60,20 +63,18 @@ pub fn connection_color(state: ConnectionState) -> Color {
 pub enum ConnectionState { Live, Reconnecting, Offline }
 
 /// Notification severity color.
-pub fn severity_color(s: Sev) -> Color {
+pub fn severity_color(s: &Severity) -> Color {
     match s {
-        Sev::Info   => Color::Rgb(0x60, 0xA5, 0xFA), // blue-400
-        Sev::Warn   => Color::Rgb(0xF5, 0x9E, 0x0A), // amber-500
-        Sev::Urgent => Color::Rgb(0xEF, 0x44, 0x44), // red-500
+        Severity::Info   => Color::Rgb(0x60, 0xA5, 0xFA), // blue-400
+        Severity::Warn   => Color::Rgb(0xFB, 0xBF, 0x24), // amber-400
+        Severity::Urgent => Color::Rgb(0xEF, 0x44, 0x44), // red-500
     }
 }
-
-#[derive(Debug, Clone, Copy)]
-pub enum Sev { Info, Warn, Urgent }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::notifications::rule::Severity;
 
     #[test]
     fn agent_color_is_deterministic() {
@@ -101,6 +102,24 @@ mod tests {
     fn agent_color_index_in_bounds() {
         for n in ["a", "b", "claude-code", "very-long-agent-name-asdf-asdf"] {
             assert!(agent_color_index(n) < AGENT_PALETTE.len());
+        }
+    }
+
+    #[test]
+    fn brand_orange_is_not_used_for_state_signaling() {
+        // Per the file's chrome-vs-state rule: brand orange must never
+        // appear in any state-conveying color (severity or connection).
+        let state_colors = [
+            connection_color(ConnectionState::Live),
+            connection_color(ConnectionState::Reconnecting),
+            connection_color(ConnectionState::Offline),
+            severity_color(&Severity::Info),
+            severity_color(&Severity::Warn),
+            severity_color(&Severity::Urgent),
+        ];
+        for c in state_colors {
+            assert_ne!(c, BRAND_ORANGE, "state color must not equal BRAND_ORANGE");
+            assert_ne!(c, BRAND_ORANGE_LIGHT, "state color must not equal BRAND_ORANGE_LIGHT");
         }
     }
 }
