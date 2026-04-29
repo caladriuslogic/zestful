@@ -95,7 +95,7 @@ pub async fn handle_focus(
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let _ = (lower, project_id, terminal_id);
+    let _ = (lower, window_id, project_id, terminal_id);
 
     // Generic fallback: just activate the app by name.
     crate::workspace::uri::activate_generic(app).await

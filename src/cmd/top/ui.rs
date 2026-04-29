@@ -156,9 +156,6 @@ pub fn draw_toast(f: &mut Frame, state: &AppState) {
     );
 }
 
-// Used by later tasks — placeholder so subsequent tasks compile.
-pub fn draw_empty_state(_f: &mut Frame, _area: Rect, _state: &AppState) { /* Task 9/10 */ }
-
 pub fn draw_tiles_list(f: &mut Frame, area: Rect, state: &AppState) {
     use crate::cmd::top::colors::agent_color;
     let visible = state.visible_tiles();

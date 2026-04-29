@@ -10,31 +10,25 @@ use std::time::Duration;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
+// Wire-format response wrappers. We only consume the array payload —
+// metadata fields like `window_hours`/`computed_at`/`next_cursor`/`has_more`
+// from the daemon are accepted (and ignored) via Deserialize's default
+// behavior of skipping unknown fields. If pagination becomes useful, add
+// fields back here.
+
 #[derive(Debug, Deserialize)]
 pub struct TilesResponse {
     pub tiles: Vec<Tile>,
-    #[serde(default)]
-    pub window_hours: i64,
-    #[serde(default)]
-    pub computed_at: i64,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct NotificationsResponse {
     pub notifications: Vec<Notification>,
-    #[serde(default)]
-    pub window_hours: i64,
-    #[serde(default)]
-    pub computed_at: i64,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct EventsResponse {
     pub events: Vec<EventRow>,
-    #[serde(default)]
-    pub next_cursor: Option<String>,
-    #[serde(default)]
-    pub has_more: bool,
 }
 
 pub struct Client {
@@ -63,9 +57,6 @@ impl Client {
             http,
         })
     }
-
-    pub fn base_url(&self) -> &str { &self.base_url }
-    pub fn token(&self) -> &str { &self.token }
 
     pub async fn tiles(&self, since_ms: i64) -> Result<Vec<Tile>> {
         let resp = self.http
