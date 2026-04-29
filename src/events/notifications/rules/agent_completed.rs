@@ -11,9 +11,6 @@ impl Rule for AgentCompleted {
     fn id(&self) -> &'static str {
         "agent_completed"
     }
-    fn severity(&self) -> Severity {
-        Severity::Warn
-    }
     fn evaluate(
         &self,
         tile: &Tile,
