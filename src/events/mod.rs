@@ -18,5 +18,5 @@ pub mod notifications;
 pub mod store;
 pub mod tiles;
 
-pub use map::map_hook_payload;
+pub use map::{map_cli_notify, map_hook_payload};
 pub use send::send_to_daemon;
