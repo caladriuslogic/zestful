@@ -30,6 +30,7 @@ pub fn draw(f: &mut Frame, state: &AppState) {
     draw_tiles_list(f, body_chunks[0], state);
     draw_detail_pane(f, body_chunks[1], state);
     draw_status_bar(f, chunks[2], state);
+    draw_toast(f, state);
     draw_help_overlay(f, state);
 }
 
@@ -133,6 +134,26 @@ pub fn draw_help_overlay(f: &mut Frame, state: &AppState) {
         Style::default().fg(Color::DarkGray),
     )));
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+pub fn draw_toast(f: &mut Frame, state: &AppState) {
+    let Some((msg, _)) = &state.toast else { return; };
+    let area = f.area();
+    // Render as a one-line strip at row h-2 (just above the status bar),
+    // right-aligned within the full width with brand-orange foreground.
+    if area.height < 3 { return; }
+    let row = area.height - 2;
+    let strip = Rect::new(area.x, area.y + row, area.width, 1);
+    f.render_widget(ratatui::widgets::Clear, strip);
+    let text = Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(msg.clone(), Style::default().fg(BRAND_ORANGE).add_modifier(Modifier::BOLD)),
+        Span::styled(" ", Style::default()),
+    ]);
+    f.render_widget(
+        Paragraph::new(text).alignment(ratatui::layout::Alignment::Right),
+        strip,
+    );
 }
 
 // Used by later tasks — placeholder so subsequent tasks compile.
@@ -457,5 +478,18 @@ mod tests {
             all.push('\n');
         }
         assert!(!all.contains("Navigation"), "help should be hidden");
+    }
+
+    #[test]
+    fn toast_renders_when_set() {
+        let mut state = AppState::new();
+        state.toast = Some(("focus failed: x".to_string(), std::time::Instant::now()));
+        let buf = render(&state, 80, 10);
+        let mut all = String::new();
+        for y in 0..10 {
+            for x in 0..80 { all.push_str(buf.cell((x, y)).unwrap().symbol()); }
+            all.push('\n');
+        }
+        assert!(all.contains("focus failed: x"), "expected toast text in buffer, got:\n{}", all);
     }
 }
