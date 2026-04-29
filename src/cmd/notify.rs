@@ -59,15 +59,28 @@ pub fn run(
         eprintln!("zestful: uri={}", terminal_uri.as_deref().unwrap_or("none"));
     }
 
-    send(
+    // `send` already swallows its own network errors and always returns Ok;
+    // the discard makes the fire-and-forget intent explicit and matches the
+    // pattern already used in cmd/watch.rs.
+    let _ = send(
         &token,
         port,
         &agent,
         &message,
         &severity,
-        terminal_uri,
+        terminal_uri.clone(),
         no_push,
-    )
+    );
+
+    // Also emit a structured event to the daemon (PR1 of legacy-/notify retirement).
+    // Best-effort: errors are logged and swallowed — failure to reach the daemon must
+    // never break the user-facing notify path. Mirror cmd/hook.rs.
+    let envelopes = crate::events::map_cli_notify(&agent, &message, terminal_uri);
+    if let Err(e) = crate::events::send_to_daemon(&envelopes) {
+        crate::log::log("notify", &format!("event emission failed: {}", e));
+    }
+
+    Ok(())
 }
 
 /// Send a notification to the Zestful app. Used by both `notify` and `watch` commands.
