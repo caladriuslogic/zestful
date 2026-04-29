@@ -118,6 +118,51 @@ impl Client {
     }
 }
 
+use crate::events::broadcast::ProjectionChangedFrame;
+use futures::stream::Stream;
+use futures::StreamExt;
+
+/// One frame emitted by the daemon's SSE `/stream` endpoint, or a
+/// connection-state transition synthesized by the client.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    Connected,
+    ProjectionChanged(ProjectionChangedFrame),
+    Disconnected(String),
+}
+
+impl Client {
+    /// Subscribe to the daemon's projection-change SSE stream. Auto-
+    /// reconnects with exponential backoff via `reqwest_eventsource`.
+    /// Yields `StreamEvent`s indefinitely.
+    pub fn stream(&self) -> impl Stream<Item = StreamEvent> + Send + 'static {
+        use reqwest_eventsource::{Event as RsEvent, EventSource};
+
+        let url = format!("{}/stream", self.base_url);
+        let token = self.token.clone();
+
+        let req = reqwest::Client::new()
+            .get(&url)
+            .header("X-Zestful-Token", token);
+        let es = EventSource::new(req).expect("EventSource::new");
+
+        es.filter_map(|res| async move {
+            match res {
+                Ok(RsEvent::Open) => Some(StreamEvent::Connected),
+                Ok(RsEvent::Message(m)) => {
+                    // Daemon names its events "projection.changed".
+                    if m.event != "projection.changed" { return None; }
+                    match serde_json::from_str::<ProjectionChangedFrame>(&m.data) {
+                        Ok(frame) => Some(StreamEvent::ProjectionChanged(frame)),
+                        Err(_) => None, // Malformed; skip.
+                    }
+                }
+                Err(e) => Some(StreamEvent::Disconnected(format!("{}", e))),
+            }
+        })
+    }
+}
+
 async fn check_status(resp: &reqwest::Response) -> Result<()> {
     let status = resp.status();
     if status.is_success() { return Ok(()); }
@@ -228,5 +273,56 @@ mod tests {
         let evs = c.events_for_agent("claude-code", 0, 50).await.unwrap();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].event_type, "turn.completed");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stream_emits_initial_then_projection_changed() {
+        // Mount the real daemon's /stream handler so we exercise the
+        // actual SSE protocol the macOS app consumes. This is the
+        // contract-validation point.
+        std::env::set_var("ZESTFUL_TOKEN_OVERRIDE", "x");
+        use tempfile::NamedTempFile;
+        let f = NamedTempFile::new().unwrap();
+        crate::events::store::init(f.path()).expect("store init");
+
+        let app = axum::Router::new().route("/stream", axum::routing::get(crate::cmd::daemon::handle_stream));
+
+        let url = spawn_test_daemon(app).await;
+        let c = Client::new(&url, "x").unwrap();
+        let mut s = Box::pin(c.stream());
+
+        // First event: synthetic "initial" frame from the daemon on connect
+        // (or a Connected synthesized by reqwest-eventsource first).
+        let first = tokio::time::timeout(std::time::Duration::from_secs(3), s.next()).await
+            .expect("timeout waiting for first stream event")
+            .expect("stream ended unexpectedly");
+        match first {
+            StreamEvent::ProjectionChanged(_) => {} // ok — daemon's initial frame
+            StreamEvent::Connected => {
+                // Some libs emit Connected first; advance once to find ProjectionChanged.
+                let next = tokio::time::timeout(std::time::Duration::from_secs(3), s.next()).await
+                    .expect("timeout").expect("stream ended");
+                assert!(matches!(next, StreamEvent::ProjectionChanged(_)));
+            }
+            other => panic!("expected ProjectionChanged or Connected, got {:?}", other),
+        }
+
+        // Trigger a real frame via the broadcast channel.
+        crate::events::broadcast::send(crate::events::broadcast::ProjectionChangedFrame {
+            source_event_types: vec!["test".to_string()],
+            ts: 0,
+            reason: Some("test".to_string()),
+        });
+
+        let next = tokio::time::timeout(std::time::Duration::from_secs(3), s.next()).await
+            .expect("timeout waiting for triggered frame")
+            .expect("stream ended");
+        match next {
+            StreamEvent::ProjectionChanged(f) => {
+                assert_eq!(f.reason.as_deref(), Some("test"));
+            }
+            other => panic!("expected ProjectionChanged, got {:?}", other),
+        }
     }
 }

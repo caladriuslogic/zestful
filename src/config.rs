@@ -49,6 +49,9 @@ pub fn daemon_port() -> u16 {
 
 /// Read the auth token from config file, falling back to macOS UserDefaults.
 pub fn read_token() -> Option<String> {
+    if let Ok(v) = std::env::var("ZESTFUL_TOKEN_OVERRIDE") {
+        return Some(v);
+    }
     // Try file first
     if let Ok(token) = fs::read_to_string(token_file()) {
         let token = token.trim().to_string();

@@ -6,7 +6,7 @@
 //! (OnceLock) so handlers don't need an extra axum state parameter —
 //! mirrors the style of `crate::events::store::conn`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use tokio::sync::broadcast;
 
@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 /// (day one: Mac app) treat any frame as "something changed, go refetch".
 /// The fields are hints — they let future consumers be smarter about
 /// which projection to refetch, but nothing breaks if they're ignored.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ProjectionChangedFrame {
     /// Event types that triggered this frame. Empty for synthetic frames
     /// (initial-connect, lag-catchup).
