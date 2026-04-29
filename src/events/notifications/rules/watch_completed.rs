@@ -115,6 +115,7 @@ mod tests {
         let refs = vec![&e1];
         let body = WatchCompleted.evaluate(&tile, &refs, 2000).expect("expected Some");
         assert_eq!(body.severity, Severity::Warn);
+        assert_eq!(body.push, true);
         assert_eq!(body.message, "true finished");
     }
 
