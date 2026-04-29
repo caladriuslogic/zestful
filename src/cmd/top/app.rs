@@ -158,6 +158,8 @@ impl AppState {
                     fx.push(SideEffect::RefetchEventsForSelected);
                 }
             }
+            // Two-pane layout: forward and backward both toggle. If a third
+            // pane is added later, split the arms.
             Action::FocusNextPane | Action::FocusPrevPane => {
                 self.focused_pane = match self.focused_pane {
                     Pane::TilesList => Pane::Detail,
@@ -243,6 +245,12 @@ pub fn sparkline_bins(events: &[EventRow], now_ms: i64) -> [u32; 60] {
 }
 
 /// Render a 60-bin counts array into a sparkline string of 60 glyphs.
+///
+/// Per the spec: empty buckets and very-low-count buckets both render
+/// as `▁`. This means a single event in a window dominated by an
+/// 8-event burst is visually indistinguishable from no events — that's
+/// the intended fidelity (sparkline is "shape of activity," not exact
+/// counts). For exact counts, a tabular view is the right tool.
 pub fn sparkline_glyphs(bins: &[u32; 60]) -> String {
     const GLYPHS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let max = *bins.iter().max().unwrap_or(&0);
