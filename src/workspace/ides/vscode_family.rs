@@ -1,15 +1,12 @@
 //! Detection for VS Code and its forks (Cursor, Windsurf, etc.).
 //!
-//! Strategy: each open workspace window keeps a `state.vscdb` file open under
-//! `~/Library/Application Support/<App>/User/workspaceStorage/<hash>/`. The
-//! sibling `workspace.json` records the folder URI. We use `lsof` against
-//! the running app's PID to find which workspace storage dirs are *currently*
-//! open, then read each `workspace.json` to extract the project path.
-//!
-//! This avoids needing Accessibility / System Events permission.
+//! Strategy: confirm the editor is running via `ps`, then read
+//! `~/Library/Application Support/<App>/User/globalStorage/storage.json`
+//! which VS Code-family editors keep updated with the open window list under
+//! the `windowsState` key. This mirrors the Windows detection approach.
 
 use anyhow::Result;
-use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -19,6 +16,7 @@ use crate::workspace::types::{IdeInstance, IdeProject};
 
 struct AppSpec {
     process_name: &'static str,
+    bundle_name: &'static str, // macOS .app bundle name
     support_dir: &'static str, // relative to ~/Library/Application Support/
     display: &'static str,
 }
@@ -26,16 +24,19 @@ struct AppSpec {
 const APPS: &[AppSpec] = &[
     AppSpec {
         process_name: "Code",
+        bundle_name: "Visual Studio Code",
         support_dir: "Code",
         display: "Visual Studio Code",
     },
     AppSpec {
         process_name: "Cursor",
+        bundle_name: "Cursor",
         support_dir: "Cursor",
         display: "Cursor",
     },
     AppSpec {
         process_name: "Windsurf",
+        bundle_name: "Windsurf",
         support_dir: "Windsurf",
         display: "Windsurf",
     },
@@ -81,13 +82,6 @@ impl Family {
             Family::Windsurf => "Windsurf",
         }
     }
-    fn process_name(self) -> &'static str {
-        match self {
-            Family::VSCode => "Code",
-            Family::Cursor => "Cursor",
-            Family::Windsurf => "Windsurf",
-        }
-    }
 }
 
 /// Focus a specific integrated terminal in a VS Code-family editor by
@@ -113,7 +107,7 @@ pub async fn focus_terminal(family: Family, terminal_id: &str) -> Result<()> {
 }
 
 /// Focus a VS Code-family project window. If `project_id` is given, resolve
-/// its path from the editor's workspaceStorage and reopen (the editor will
+/// its path from the editor's storage.json and reopen (the editor will
 /// promote the matching window to the front); if not, just activate the app.
 pub async fn focus(family: Family, project_id: Option<&str>) -> Result<()> {
     let project_id_owned = project_id.map(String::from);
@@ -187,38 +181,35 @@ fn find_cli(family: Family) -> Option<std::path::PathBuf> {
 }
 
 /// Look up the workspace folder path for a given project name by scanning
-/// the editor's workspaceStorage directories.
+/// storage.json for a matching open window.
 fn lookup_project_path(family: Family, project_name: &str) -> Option<String> {
-    let home = home_dir()?;
-    let storage = home
+    let storage_json = home_dir()?
         .join("Library/Application Support")
         .join(family.support_dir())
-        .join("User/workspaceStorage");
-    let entries = fs::read_dir(&storage).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let ws_json = path.join("workspace.json");
-        let Ok(contents) = fs::read_to_string(&ws_json) else {
-            continue;
-        };
-        let Ok(parsed) = serde_json::from_str::<WorkspaceFile>(&contents) else {
-            continue;
-        };
-        let Some(uri) = parsed.folder.or(parsed.workspace) else {
-            continue;
-        };
-        let local = uri.strip_prefix("file://").unwrap_or(&uri);
-        let decoded = urlencoding_decode(local);
-        let name = PathBuf::from(&decoded)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if name == project_name {
-            return Some(decoded);
+        .join("User/globalStorage/storage.json");
+    let contents = fs::read_to_string(&storage_json).ok()?;
+    let root: Value = serde_json::from_str(&contents).ok()?;
+    let ws = root.get("windowsState")?;
+
+    let last = ws.get("lastActiveWindow").into_iter();
+    let opened = ws
+        .get("openedWindows")
+        .and_then(|w| w.as_array())
+        .map(|a| a.iter())
+        .into_iter()
+        .flatten();
+
+    for win in last.chain(opened) {
+        if let Some(path) = window_folder(win) {
+            let name = PathBuf::from(&path)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if name == project_name {
+                return Some(path);
+            }
         }
     }
-    // Suppress unused-variable warning on non-macOS
-    let _ = family.process_name();
     None
 }
 
@@ -233,18 +224,12 @@ pub fn detect_all() -> Result<Vec<IdeInstance>> {
 }
 
 fn detect_one(spec: &AppSpec) -> Option<IdeInstance> {
-    let pid = pgrep_first(spec.process_name)?;
-    let storage_root = home_dir()?
+    let pid = ps_first_pid(spec.bundle_name, spec.process_name)?;
+    let storage_json = home_dir()?
         .join("Library/Application Support")
         .join(spec.support_dir)
-        .join("User/workspaceStorage");
-
-    let open_dirs = lsof_workspace_dirs(pid, &storage_root);
-    let projects: Vec<IdeProject> = open_dirs
-        .iter()
-        .filter_map(|dir| read_workspace_project(dir))
-        .collect();
-
+        .join("User/globalStorage/storage.json");
+    let projects = read_open_projects(&storage_json);
     Some(IdeInstance {
         app: spec.display.to_string(),
         pid: Some(pid),
@@ -252,73 +237,87 @@ fn detect_one(spec: &AppSpec) -> Option<IdeInstance> {
     })
 }
 
-/// Use `lsof` to find every workspace storage directory currently held open
-/// by the given app PID.
-fn lsof_workspace_dirs(pid: u32, storage_root: &PathBuf) -> Vec<PathBuf> {
-    let output = Command::new("lsof").args(["-p", &pid.to_string()]).output();
-    let stdout = match output {
-        Ok(o) if o.status.success() || !o.stdout.is_empty() => {
-            String::from_utf8_lossy(&o.stdout).into_owned()
+/// Find the PID of a VS Code-family editor by matching its `.app` bundle path
+/// in `ps` output. Works on macOS versions where `pgrep` cannot enumerate the
+/// main Electron process due to privacy restrictions.
+fn ps_first_pid(bundle_name: &str, binary_name: &str) -> Option<u32> {
+    let suffix = format!("{}.app/Contents/MacOS/{}", bundle_name, binary_name);
+    let output = Command::new("ps").args(["-xo", "pid=,command="]).output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.ends_with(&suffix) {
+            return trimmed.split_whitespace().next()?.parse().ok();
         }
-        _ => return vec![],
+    }
+    None
+}
+
+/// Parse the currently-open window folders from VS Code's `storage.json`.
+///
+/// The file contains a `windowsState` object with `lastActiveWindow` and
+/// `openedWindows` entries, each optionally carrying a `folder` URI.
+fn read_open_projects(storage_json: &PathBuf) -> Vec<IdeProject> {
+    let contents = match fs::read_to_string(storage_json) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let root: Value = match serde_json::from_str(&contents) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let Some(ws) = root.get("windowsState") else {
+        return vec![];
     };
 
-    let prefix = storage_root.to_string_lossy().to_string() + "/";
-    let mut seen = HashSet::new();
-    let mut dirs = Vec::new();
-    for line in stdout.lines() {
-        if let Some(idx) = line.find(&prefix) {
-            let rest = &line[idx + prefix.len()..];
-            // Hash directory is the segment up to the next "/"
-            let hash = rest.split('/').next().unwrap_or("");
-            if !hash.is_empty() && seen.insert(hash.to_string()) {
-                dirs.push(storage_root.join(hash));
+    let mut projects: Vec<IdeProject> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    let last_active_folder = ws
+        .get("lastActiveWindow")
+        .and_then(|w| window_folder(w));
+
+    let mut add = |folder: String, active: bool| {
+        if seen.insert(folder.clone()) {
+            let name = PathBuf::from(&folder)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !name.is_empty() {
+                projects.push(IdeProject {
+                    name,
+                    uri: None,
+                    path: folder,
+                    active,
+                });
+            }
+        }
+    };
+
+    if let Some(f) = last_active_folder.clone() {
+        add(f, true);
+    }
+    if let Some(opened) = ws.get("openedWindows").and_then(|w| w.as_array()) {
+        for win in opened {
+            if let Some(f) = window_folder(win) {
+                let is_active = last_active_folder.as_deref() == Some(&f);
+                add(f, is_active);
             }
         }
     }
-    dirs
+
+    projects
 }
 
-#[derive(Deserialize)]
-struct WorkspaceFile {
-    folder: Option<String>,
-    workspace: Option<String>,
-}
-
-/// Read `<dir>/workspace.json` and return an IdeProject for its folder/workspace path.
-fn read_workspace_project(dir: &PathBuf) -> Option<IdeProject> {
-    let path = dir.join("workspace.json");
-    let contents = fs::read_to_string(&path).ok()?;
-    let parsed: WorkspaceFile = serde_json::from_str(&contents).ok()?;
-    let uri = parsed.folder.or(parsed.workspace)?;
-    let local = uri.strip_prefix("file://").unwrap_or(&uri);
+fn window_folder(win: &Value) -> Option<String> {
+    let uri = win.get("folder")?.as_str()?;
+    let local = uri.strip_prefix("file://").unwrap_or(uri);
     let decoded = urlencoding_decode(local);
-    let name = PathBuf::from(&decoded)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    if name.is_empty() {
-        return None;
+    if decoded.is_empty() {
+        None
+    } else {
+        Some(decoded)
     }
-    Some(IdeProject {
-        name,
-        uri: None,
-        path: decoded,
-        active: false, // can't tell without UI scripting
-    })
-}
-
-fn pgrep_first(name: &str) -> Option<u32> {
-    let output = Command::new("pgrep").args(["-x", name]).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .lines()
-        .next()?
-        .parse()
-        .ok()
 }
 
 fn home_dir() -> Option<PathBuf> {
