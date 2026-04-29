@@ -12,6 +12,7 @@ use crate::events::payload::{
     TurnCompleted, TurnPromptSubmitted, WatchCompleted,
 };
 use crate::events::preview::{sha256_hex, truncate_utf8_safe};
+use crate::events::severity::Severity;
 use crate::hooks::AgentKind;
 use serde_json::Value;
 
@@ -155,6 +156,8 @@ pub fn map_cli_notify(
     agent: &str,
     message: &str,
     focus_uri: Option<String>,
+    severity_hint: Option<Severity>,
+    push_hint: Option<bool>,
 ) -> Vec<Envelope> {
     let host = hostname();
     let os_user = os_user();
@@ -195,8 +198,8 @@ pub fn map_cli_notify(
     let payload = Payload::AgentNotified(AgentNotified {
         kind: "notification".to_string(),
         message: Some(truncate_utf8_safe(message, MESSAGE_MAX)),
-        severity_hint: None,
-        push_hint: None,
+        severity_hint,
+        push_hint,
     });
 
     vec![Envelope {
@@ -974,7 +977,7 @@ mod tests {
 
     #[test]
     fn map_cli_notify_returns_one_envelope() {
-        let envs = map_cli_notify("test-agent", "hello world", None);
+        let envs = map_cli_notify("test-agent", "hello world", None, None, None);
         assert_eq!(envs.len(), 1);
         let e = &envs[0];
         assert_eq!(e.type_, "agent.notified");
@@ -985,7 +988,7 @@ mod tests {
 
     #[test]
     fn map_cli_notify_envelope_has_required_fields() {
-        let envs = map_cli_notify("a", "m", None);
+        let envs = map_cli_notify("a", "m", None, None, None);
         let e = &envs[0];
         assert_eq!(e.schema, 1);
         assert!(e.ts > 0);
@@ -1001,13 +1004,13 @@ mod tests {
 
     #[test]
     fn map_cli_notify_no_correlation() {
-        let envs = map_cli_notify("a", "m", None);
+        let envs = map_cli_notify("a", "m", None, None, None);
         assert!(envs[0].correlation.is_none());
     }
 
     #[test]
     fn map_cli_notify_populates_context_agent() {
-        let envs = map_cli_notify("claude-code:zestful", "hello", None);
+        let envs = map_cli_notify("claude-code:zestful", "hello", None, None, None);
         let ctx = envs[0].context.as_ref().expect("expected Some(context)");
         assert_eq!(ctx.agent.as_deref(), Some("claude-code:zestful"));
     }
@@ -1015,7 +1018,7 @@ mod tests {
     #[test]
     fn map_cli_notify_with_focus_uri_parses_application_instance() {
         let uri = "workspace://iterm2/window:1/tab:2".to_string();
-        let envs = map_cli_notify("a", "m", Some(uri.clone()));
+        let envs = map_cli_notify("a", "m", Some(uri.clone()), None, None);
         let ctx = envs[0].context.as_ref().expect("expected Some(context)");
         assert_eq!(ctx.focus_uri.as_deref(), Some(uri.as_str()));
         assert_eq!(ctx.application.as_deref(), Some("iTerm2"));
@@ -1024,7 +1027,7 @@ mod tests {
 
     #[test]
     fn map_cli_notify_without_focus_uri_leaves_application_none() {
-        let envs = map_cli_notify("a", "m", None);
+        let envs = map_cli_notify("a", "m", None, None, None);
         let ctx = envs[0].context.as_ref().expect("expected Some(context)");
         assert_eq!(ctx.focus_uri, None);
         assert_eq!(ctx.application, None);
@@ -1034,7 +1037,7 @@ mod tests {
     #[test]
     fn map_cli_notify_truncates_long_message() {
         let long = "x".repeat(MESSAGE_MAX + 200);
-        let envs = map_cli_notify("a", &long, None);
+        let envs = map_cli_notify("a", &long, None, None, None);
         let msg = envs[0].payload["message"].as_str().unwrap();
         assert_eq!(msg.len(), MESSAGE_MAX);
     }
@@ -1049,7 +1052,7 @@ mod tests {
             std::env::set_var("TMUX_PANE", "%7");
         }
 
-        let envs = map_cli_notify("a", "m", None);
+        let envs = map_cli_notify("a", "m", None, None, None);
         let ctx = envs[0].context.as_ref().expect("expected Some(context)");
         let sub = ctx.subapplication.as_ref().expect("expected Some(subapplication)");
 
@@ -1068,6 +1071,28 @@ mod tests {
         assert_eq!(sub.kind, "tmux");
         assert_eq!(sub.session.as_deref(), Some("3"));
         assert_eq!(sub.pane.as_deref(), Some("%7"));
+    }
+
+    #[test]
+    fn map_cli_notify_carries_severity_hint() {
+        let envs = map_cli_notify("a", "m", None, Some(Severity::Urgent), None);
+        let p = &envs[0].payload;
+        assert_eq!(p["severity_hint"], "urgent");
+    }
+
+    #[test]
+    fn map_cli_notify_carries_push_hint() {
+        let envs = map_cli_notify("a", "m", None, None, Some(false));
+        let p = &envs[0].payload;
+        assert_eq!(p["push_hint"], false);
+    }
+
+    #[test]
+    fn map_cli_notify_omits_hints_when_none() {
+        let envs = map_cli_notify("a", "m", None, None, None);
+        let p = &envs[0].payload;
+        assert!(p.get("severity_hint").is_none());
+        assert!(p.get("push_hint").is_none());
     }
 
     #[test]
