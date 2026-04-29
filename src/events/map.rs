@@ -9,7 +9,7 @@ use crate::events::env_capture;
 use crate::events::envelope::{Context, Correlation, Envelope, Subapplication};
 use crate::events::payload::{
     AgentNotified, Payload, PermissionRequested, SessionStarted, ToolCompleted, ToolInvoked,
-    TurnCompleted, TurnPromptSubmitted,
+    TurnCompleted, TurnPromptSubmitted, WatchCompleted,
 };
 use crate::events::preview::{sha256_hex, truncate_utf8_safe};
 use crate::hooks::AgentKind;
@@ -197,6 +197,78 @@ pub fn map_cli_notify(
         message: Some(truncate_utf8_safe(message, MESSAGE_MAX)),
         severity_hint: None,
         push_hint: None,
+    });
+
+    vec![Envelope {
+        id: ulid::Ulid::new().to_string(),
+        schema: 1,
+        ts,
+        seq: 0,
+        host,
+        os_user,
+        device_id: device,
+        source: "cli".to_string(),
+        source_pid,
+        type_: payload.type_str().to_string(),
+        correlation: None,
+        context: Some(context),
+        payload: payload.to_body_value(),
+    }]
+}
+
+/// Build a single `watch.completed` envelope for `zestful watch` exits.
+///
+/// `agent_name` is already formatted by the caller as `"<user-agent>:<cmd_basename>"`
+/// (matching PR1's `<agent>:<cmd>` convention so tile derivation buckets by command).
+/// `command` is just the basename (used for the rule's message synthesis when no
+/// explicit payload message is provided).
+pub fn map_watch_completed(
+    agent_name: &str,
+    command: &str,
+    exit_code: i32,
+    duration_ms: Option<u64>,
+    focus_uri: Option<String>,
+) -> Vec<Envelope> {
+    let host = hostname();
+    let os_user = os_user();
+    let device = device::device_id();
+    let source_pid = std::process::id();
+    let ts = now_unix_ms();
+
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from));
+    let project = cwd
+        .as_deref()
+        .and_then(|p| std::path::Path::new(p).file_name())
+        .map(|s| s.to_string_lossy().into_owned());
+    let shell = std::env::var("SHELL").ok().and_then(|s| {
+        std::path::Path::new(&s)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+    });
+
+    let (application, application_instance) = application_from_focus_uri(focus_uri.as_deref());
+
+    let context = Context {
+        agent: Some(agent_name.to_string()),
+        application,
+        application_instance,
+        focus_uri,
+        shell,
+        subapplication: tmux_subapplication(),
+        cwd: cwd.clone(),
+        workspace_root: cwd,
+        project,
+        env_vars_observed: env_capture::capture(),
+        ..Default::default()
+    };
+
+    let payload = Payload::WatchCompleted(WatchCompleted {
+        command: command.to_string(),
+        exit_code,
+        duration_ms,
+        message: None,  // rule synthesizes from command + exit_code
     });
 
     vec![Envelope {
@@ -996,6 +1068,58 @@ mod tests {
         assert_eq!(sub.kind, "tmux");
         assert_eq!(sub.session.as_deref(), Some("3"));
         assert_eq!(sub.pane.as_deref(), Some("%7"));
+    }
+
+    #[test]
+    fn map_watch_completed_returns_one_envelope_with_correct_shape() {
+        let envs = map_watch_completed("watch:npm", "npm", 0, Some(1234), None);
+        assert_eq!(envs.len(), 1);
+        let e = &envs[0];
+        assert_eq!(e.type_, "watch.completed");
+        assert_eq!(e.source, "cli");
+        assert_eq!(e.payload["command"], "npm");
+        assert_eq!(e.payload["exit_code"], 0);
+        assert_eq!(e.payload["duration_ms"], 1234);
+    }
+
+    #[test]
+    fn map_watch_completed_envelope_has_required_fields() {
+        let envs = map_watch_completed("watch:x", "x", 1, None, None);
+        let e = &envs[0];
+        assert_eq!(e.schema, 1);
+        assert!(e.ts > 0);
+        assert_eq!(e.id.len(), 26);
+        assert!(!e.host.is_empty());
+        assert!(!e.os_user.is_empty());
+        assert!(!e.device_id.is_empty());
+        assert_eq!(e.source, "cli");
+        assert_eq!(e.source_pid, std::process::id());
+        assert_eq!(e.seq, 0);
+        assert!(e.correlation.is_none());
+    }
+
+    #[test]
+    fn map_watch_completed_populates_context_agent() {
+        let envs = map_watch_completed("buildbot:make", "make", 0, None, None);
+        let ctx = envs[0].context.as_ref().expect("expected Some(context)");
+        assert_eq!(ctx.agent.as_deref(), Some("buildbot:make"));
+    }
+
+    #[test]
+    fn map_watch_completed_omits_optional_payload_fields_when_none() {
+        let envs = map_watch_completed("watch:x", "x", 0, None, None);
+        let p = &envs[0].payload;
+        assert!(p.get("duration_ms").is_none());
+        assert!(p.get("message").is_none());
+    }
+
+    #[test]
+    fn map_watch_completed_includes_focus_uri_in_context() {
+        let uri = "workspace://iterm2/window:1/tab:2".to_string();
+        let envs = map_watch_completed("watch:x", "x", 0, None, Some(uri.clone()));
+        let ctx = envs[0].context.as_ref().expect("expected Some(context)");
+        assert_eq!(ctx.focus_uri.as_deref(), Some(uri.as_str()));
+        assert_eq!(ctx.application.as_deref(), Some("iTerm2"));
     }
 
 }
