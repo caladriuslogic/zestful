@@ -324,5 +324,7 @@ mod tests {
             }
             other => panic!("expected ProjectionChanged, got {:?}", other),
         }
+
+        std::env::remove_var("ZESTFUL_TOKEN_OVERRIDE");
     }
 }
