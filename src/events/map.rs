@@ -157,7 +157,7 @@ pub fn map_cli_notify(
     focus_uri: Option<String>,
 ) -> Vec<Envelope> {
     let host = hostname();
-    let os_user_val = os_user();
+    let os_user = os_user();
     let device = device::device_id();
     let source_pid = std::process::id();
     let ts = now_unix_ms();
@@ -175,25 +175,8 @@ pub fn map_cli_notify(
             .map(|f| f.to_string_lossy().into_owned())
     });
 
-    // Parse focus_uri into application + application_instance, mirroring the
-    // logic in `context_from`. Examples:
-    //   workspace://iterm2/window:1/tab:2 → app="iTerm2", instance="window:1/tab:2"
-    //   workspace://codex                  → app="codex",  instance=None
-    let (application, application_instance) = focus_uri
-        .as_deref()
-        .and_then(crate::workspace::uri::parse_terminal_uri)
-        .map(|p| {
-            let mut parts = Vec::with_capacity(2);
-            if let Some(w) = p.window_id.as_deref() {
-                parts.push(format!("window:{}", w));
-            }
-            if let Some(t) = p.tab_id.as_deref() {
-                parts.push(format!("tab:{}", t));
-            }
-            let instance = if parts.is_empty() { None } else { Some(parts.join("/")) };
-            (Some(p.app), instance)
-        })
-        .unwrap_or((None, None));
+    // application + application_instance: parsed out of the focus_uri.
+    let (application, application_instance) = application_from_focus_uri(focus_uri.as_deref());
 
     let context = Context {
         agent: Some(agent.to_string()),
@@ -222,7 +205,7 @@ pub fn map_cli_notify(
         ts,
         seq: 0,
         host,
-        os_user: os_user_val,
+        os_user,
         device_id: device,
         source: "cli".to_string(),
         source_pid,
@@ -470,25 +453,7 @@ fn context_from(
     // (including any codex_editor fallback routing). Don't re-locate.
 
     // application + application_instance: parsed out of the focus_uri.
-    // Examples:
-    //   workspace://iterm2/window:1/tab:2          → app="iterm2", instance="window:1/tab:2"
-    //   workspace://vscode/window:80836/project:X  → app="vscode",  instance="window:80836"
-    //   workspace://codex                           → app="codex",   instance=None
-    let (application, application_instance) = focus_uri
-        .as_deref()
-        .and_then(crate::workspace::uri::parse_terminal_uri)
-        .map(|p| {
-            let mut parts = Vec::with_capacity(2);
-            if let Some(w) = p.window_id.as_deref() {
-                parts.push(format!("window:{}", w));
-            }
-            if let Some(t) = p.tab_id.as_deref() {
-                parts.push(format!("tab:{}", t));
-            }
-            let instance = if parts.is_empty() { None } else { Some(parts.join("/")) };
-            (Some(p.app), instance)
-        })
-        .unwrap_or((None, None));
+    let (application, application_instance) = application_from_focus_uri(focus_uri.as_deref());
 
     let ctx = Context {
         agent: Some(agent.slug().to_string()),
@@ -508,6 +473,30 @@ fn context_from(
         ..Default::default()
     };
     Some(ctx)
+}
+
+/// Parse a `focus_uri` into `(application, application_instance)`.
+///
+/// Examples:
+///   workspace://iterm2/window:1/tab:2          → ("iTerm2", "window:1/tab:2")
+///   workspace://vscode/window:80836/project:X  → ("vscode", "window:80836")
+///   workspace://codex                          → ("codex",  None)
+///   None                                       → (None,     None)
+fn application_from_focus_uri(focus_uri: Option<&str>) -> (Option<String>, Option<String>) {
+    focus_uri
+        .and_then(crate::workspace::uri::parse_terminal_uri)
+        .map(|p| {
+            let mut parts = Vec::with_capacity(2);
+            if let Some(w) = p.window_id.as_deref() {
+                parts.push(format!("window:{}", w));
+            }
+            if let Some(t) = p.tab_id.as_deref() {
+                parts.push(format!("tab:{}", t));
+            }
+            let instance = if parts.is_empty() { None } else { Some(parts.join("/")) };
+            (Some(p.app), instance)
+        })
+        .unwrap_or((None, None))
 }
 
 fn tmux_subapplication() -> Option<Subapplication> {
