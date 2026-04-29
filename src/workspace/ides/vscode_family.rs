@@ -149,14 +149,14 @@ fn find_cli(family: Family) -> Option<std::path::PathBuf> {
     let cli_name = family.cli_name();
     let candidates: &[&str] = match family {
         Family::VSCode => &[
+            "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
             "/usr/local/bin/code",
             "/opt/homebrew/bin/code",
-            "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
         ],
         Family::Cursor => &[
+            "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
             "/usr/local/bin/cursor",
             "/opt/homebrew/bin/cursor",
-            "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
         ],
         Family::Windsurf => &["/usr/local/bin/windsurf", "/opt/homebrew/bin/windsurf"],
     };
