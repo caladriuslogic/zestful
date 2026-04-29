@@ -45,6 +45,7 @@ pub enum InputMode {
 pub struct HelpRow {
     pub section: &'static str,
     pub keys: &'static str,
+    #[allow(dead_code)] // consumed by ui.rs help overlay in Task 10
     pub description: &'static str,
 }
 
@@ -135,6 +136,11 @@ mod tests {
         assert_eq!(key_to_action(k(KeyCode::Char('a')), InputMode::Filter), Some(Action::FilterChar('a')));
         assert_eq!(key_to_action(k(KeyCode::Backspace), InputMode::Filter), Some(Action::FilterBackspace));
         assert_eq!(key_to_action(k(KeyCode::Esc), InputMode::Filter), Some(Action::ExitFilterMode));
+        // Bare 'c' in filter mode is just text, not Ctrl-C (verifies the
+        // early-return for Ctrl-C doesn't shadow normal char input).
+        assert_eq!(key_to_action(k(KeyCode::Char('c')), InputMode::Filter), Some(Action::FilterChar('c')));
+        // 'q' in filter mode is text, not Quit.
+        assert_eq!(key_to_action(k(KeyCode::Char('q')), InputMode::Filter), Some(Action::FilterChar('q')));
     }
 
     #[test]
@@ -150,13 +156,32 @@ mod tests {
     }
 
     #[test]
+    fn question_mark_toggles_help_in_normal() {
+        assert_eq!(key_to_action(k(KeyCode::Char('?')), InputMode::Normal), Some(Action::ToggleHelp));
+    }
+
+    #[test]
     fn help_table_covers_all_normal_actions() {
-        // Every Action that has a normal-mode binding should appear in HELP.
-        // The simpler invariant: HELP has at least one row per non-filter section.
+        // Every key bound in Normal mode should appear in at least one HELP row.
+        // Tests the invariant: keys.rs is the single source of truth — if you add a
+        // binding to key_to_action, you must add a HELP row for it.
+        let bound_keys = [
+            "↑", "↓", "k", "j", "g", "G", "PgUp", "PgDn",
+            "Tab", "Shift-Tab", "Enter", "/", "Esc",
+            "r", "?", "q", "Ctrl-C", "s", "N",
+        ];
+        for k in bound_keys {
+            assert!(
+                HELP.iter().any(|r| r.keys.contains(k)),
+                "no HELP row mentions key {:?}", k,
+            );
+        }
+        // Sections still required.
         assert!(HELP.iter().any(|r| r.section == "Navigation"));
         assert!(HELP.iter().any(|r| r.section == "Actions"));
         assert!(HELP.iter().any(|r| r.section == "Display"));
-        assert!(HELP.iter().any(|r| r.keys.contains("Enter")));
-        assert!(HELP.iter().any(|r| r.keys.contains('?')));
+        // No empty descriptions.
+        assert!(HELP.iter().all(|r| !r.description.is_empty()),
+                "HELP rows must all have non-empty descriptions");
     }
 }
