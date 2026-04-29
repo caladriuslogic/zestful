@@ -11,12 +11,14 @@ use crate::events::tiles::tile::Tile;
 
 /// Per-firing fields a Rule produces. The engine fills in the
 /// identity-derived fields (id, rule_id, tile_id) and the tile-copied
-/// fields (agent, project_label, focus_uri, severity).
+/// fields (agent, project_label, focus_uri).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NotificationBody {
     pub message: String,
     pub trigger_event_id: String,
     pub triggered_at_ms: i64,
+    pub severity: Severity,
+    pub push: bool,
 }
 
 pub trait Rule: Send + Sync {

@@ -12,6 +12,7 @@ pub struct Notification {
     pub agent: String,
     pub project_label: Option<String>,
     pub severity: Severity,
+    pub push: bool,
     pub message: String,
     pub trigger_event_id: String,
     pub triggered_at_ms: i64,

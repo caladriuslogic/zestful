@@ -26,18 +26,36 @@ impl Rule for AgentNotified {
         if latest.event_type != "agent.notified" {
             return None;
         }
-        let message = latest
-            .payload
-            .as_ref()
+        let payload = latest.payload.as_ref();
+        let message = payload
             .and_then(|p| p.get("message"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(String::from)
             .unwrap_or_else(|| format!("{} wants attention", tile.agent));
+
+        let severity_hint = payload
+            .and_then(|p| p.get("severity_hint"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| match s {
+                "info" => Some(Severity::Info),
+                "warn" => Some(Severity::Warn),
+                "urgent" => Some(Severity::Urgent),
+                _ => None,
+            });
+        let severity = severity_hint.unwrap_or(Severity::Info);
+
+        let push_hint = payload
+            .and_then(|p| p.get("push_hint"))
+            .and_then(|v| v.as_bool());
+        let push = push_hint.unwrap_or(severity != Severity::Info);
+
         Some(NotificationBody {
             message,
             trigger_event_id: latest.event_id.clone(),
             triggered_at_ms: latest.event_ts,
+            severity,
+            push,
         })
     }
 }
@@ -102,6 +120,8 @@ mod tests {
         assert_eq!(body.message, "Claude asks: continue?");
         assert_eq!(body.trigger_event_id, "evt-1");
         assert_eq!(body.triggered_at_ms, 1000);
+        assert_eq!(body.severity, Severity::Info);
+        assert_eq!(body.push, false);
     }
 
     #[test]
@@ -113,6 +133,48 @@ mod tests {
             .evaluate(&tile, &refs, 2000)
             .expect("expected Some(body)");
         assert_eq!(body.message, "claude-code wants attention");
+    }
+
+    #[test]
+    fn severity_hint_is_respected() {
+        let tile = tile_fixture();
+        let e1 = ev(1, "agent.notified", 1000,
+            json!({ "kind": "notification", "message": "blah", "severity_hint": "urgent" }));
+        let refs = vec![&e1];
+        let body = AgentNotified.evaluate(&tile, &refs, 2000).expect("expected Some");
+        assert_eq!(body.severity, Severity::Urgent);
+        assert_eq!(body.push, true);
+    }
+
+    #[test]
+    fn missing_severity_hint_defaults_to_info() {
+        let tile = tile_fixture();
+        let e1 = ev(1, "agent.notified", 1000, json!({ "kind": "notification", "message": "x" }));
+        let refs = vec![&e1];
+        let body = AgentNotified.evaluate(&tile, &refs, 2000).expect("expected Some");
+        assert_eq!(body.severity, Severity::Info);
+        assert_eq!(body.push, false);
+    }
+
+    #[test]
+    fn push_hint_overrides_default() {
+        let tile = tile_fixture();
+        let e1 = ev(1, "agent.notified", 1000,
+            json!({ "kind": "notification", "message": "shh", "severity_hint": "warn", "push_hint": false }));
+        let refs = vec![&e1];
+        let body = AgentNotified.evaluate(&tile, &refs, 2000).expect("expected Some");
+        assert_eq!(body.severity, Severity::Warn);
+        assert_eq!(body.push, false);
+    }
+
+    #[test]
+    fn invalid_severity_hint_falls_back_to_info() {
+        let tile = tile_fixture();
+        let e1 = ev(1, "agent.notified", 1000,
+            json!({ "kind": "notification", "severity_hint": "panic" }));
+        let refs = vec![&e1];
+        let body = AgentNotified.evaluate(&tile, &refs, 2000).expect("expected Some");
+        assert_eq!(body.severity, Severity::Info);
     }
 
     #[test]

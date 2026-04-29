@@ -14,7 +14,7 @@ impl Rule for PermissionPending {
         "permission_pending"
     }
     fn severity(&self) -> Severity {
-        Severity::Warn
+        Severity::Urgent
     }
     fn evaluate(
         &self,
@@ -47,6 +47,8 @@ impl Rule for PermissionPending {
                         message,
                         trigger_event_id: e.event_id.clone(),
                         triggered_at_ms: e.event_ts,
+                        severity: Severity::Urgent,
+                        push: true,
                     });
                 }
                 _ => {}
@@ -154,6 +156,8 @@ mod tests {
             body.message,
             "claude-code waiting on permission for bash on zestful"
         );
+        assert_eq!(body.severity, Severity::Urgent);
+        assert_eq!(body.push, true);
     }
 
     #[test]
@@ -185,5 +189,7 @@ mod tests {
             .evaluate(&tile, &refs, 12_000)
             .expect("expected Some(body)");
         assert_eq!(body.message, "claude-code waiting on permission");
+        assert_eq!(body.severity, Severity::Urgent);
+        assert_eq!(body.push, true);
     }
 }
