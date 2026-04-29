@@ -5,28 +5,9 @@
 //! now" or None. The engine in mod.rs iterates (tile, rule) pairs and
 //! assembles full Notification rows from each Some.
 
+pub use crate::events::severity::Severity;
 use crate::events::store::query::EventRow;
 use crate::events::tiles::tile::Tile;
-use serde::Serialize;
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Severity {
-    Info,
-    Warn,
-    Urgent,
-}
-
-impl std::fmt::Display for Severity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Severity::Info => "info",
-            Severity::Warn => "warn",
-            Severity::Urgent => "urgent",
-        };
-        f.write_str(s)
-    }
-}
 
 /// Per-firing fields a Rule produces. The engine fills in the
 /// identity-derived fields (id, rule_id, tile_id) and the tile-copied
@@ -56,22 +37,4 @@ pub trait Rule: Send + Sync {
         tile_events: &[&EventRow],
         now_ms: i64,
     ) -> Option<NotificationBody>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn severity_display_is_lowercase() {
-        assert_eq!(Severity::Info.to_string(), "info");
-        assert_eq!(Severity::Warn.to_string(), "warn");
-        assert_eq!(Severity::Urgent.to_string(), "urgent");
-    }
-
-    #[test]
-    fn severity_serializes_lowercase() {
-        let s = serde_json::to_string(&Severity::Warn).unwrap();
-        assert_eq!(s, "\"warn\"");
-    }
 }
