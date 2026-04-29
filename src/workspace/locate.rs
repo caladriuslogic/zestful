@@ -513,7 +513,7 @@ fn detect_vscode_family() -> Option<VSCodeMatch> {
     struct TerminalEntry {
         id: String,
         #[serde(rename = "shellPid")]
-        shell_pid: Option<u32>,
+        shell_pid: Option<i64>,
     }
 
     let dir = std::env::var_os("HOME")
@@ -559,8 +559,8 @@ fn detect_vscode_family() -> Option<VSCodeMatch> {
             }
         }
         for term in state.terminals.unwrap_or_default() {
-            if let Some(pid) = term.shell_pid {
-                term_by_pid.insert(pid, (slug.clone(), term.id));
+            if let Some(pid) = term.shell_pid.filter(|&p| p > 0) {
+                term_by_pid.insert(pid as u32, (slug.clone(), term.id));
             }
         }
     }
