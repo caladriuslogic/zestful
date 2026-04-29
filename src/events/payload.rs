@@ -6,6 +6,7 @@
 //! path does NOT deserialize into this enum — unknown types must be accepted
 //! for forward-compat, so the daemon works at the `serde_json::Value` layer.
 
+use crate::events::severity::Severity;
 use serde::{Deserialize, Serialize};
 
 /// Tagged union of all v1 event payloads. The serialization format uses the
@@ -146,6 +147,14 @@ pub struct AgentNotified {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub message: Option<String>,
+    /// Optional emitter-asserted severity. Rules read this as input but
+    /// remain authoritative — they may override.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub severity_hint: Option<Severity>,
+    /// Optional emitter-asserted push policy. Rules read this as input;
+    /// `Some(false)` means "do not push regardless of severity."
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub push_hint: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -301,6 +310,8 @@ mod tests {
         let with_msg = Payload::AgentNotified(AgentNotified {
             kind: "notification".into(),
             message: Some("Waiting for your input".into()),
+            severity_hint: None,
+            push_hint: None,
         });
         let body = with_msg.to_body_value();
         assert_eq!(body["kind"], "notification");
@@ -309,8 +320,52 @@ mod tests {
         let without_msg = Payload::AgentNotified(AgentNotified {
             kind: "other".into(),
             message: None,
+            severity_hint: None,
+            push_hint: None,
         });
         let body = without_msg.to_body_value();
         assert!(body.get("message").is_none());
+    }
+
+    #[test]
+    fn agent_notified_with_hints_round_trips() {
+        let p = Payload::AgentNotified(AgentNotified {
+            kind: "notification".into(),
+            message: Some("Pay attention".into()),
+            severity_hint: Some(Severity::Urgent),
+            push_hint: Some(false),
+        });
+        let body = p.to_body_value();
+        assert_eq!(body["kind"], "notification");
+        assert_eq!(body["message"], "Pay attention");
+        assert_eq!(body["severity_hint"], "urgent");
+        assert_eq!(body["push_hint"], false);
+    }
+
+    #[test]
+    fn agent_notified_omits_hints_when_none() {
+        let p = Payload::AgentNotified(AgentNotified {
+            kind: "other".into(),
+            message: None,
+            severity_hint: None,
+            push_hint: None,
+        });
+        let body = p.to_body_value();
+        assert_eq!(body["kind"], "other");
+        assert!(body.get("message").is_none());
+        assert!(body.get("severity_hint").is_none());
+        assert!(body.get("push_hint").is_none());
+    }
+
+    #[test]
+    fn agent_notified_severity_hint_serializes_lowercase() {
+        let p = Payload::AgentNotified(AgentNotified {
+            kind: "notification".into(),
+            message: None,
+            severity_hint: Some(Severity::Warn),
+            push_hint: None,
+        });
+        let body = p.to_body_value();
+        assert_eq!(body["severity_hint"], "warn");
     }
 }
