@@ -236,33 +236,35 @@ fn find_classic_console() -> Option<(String, String)> {
     // Pass our own PID explicitly — do NOT use $PID inside the script, which is the
     // spawned powershell.exe process and would match itself as "powershell" immediately.
     let our_pid = std::process::id();
-    // Walk up the process tree until we reach explorer.exe (the Windows user
-    // session root) or a system process, then return the last process seen
-    // before that boundary. That process is the top-level application the user
-    // launched (e.g. code.exe for VS Code, WindowsTerminal.exe for WT) — its
-    // PID is stable for the lifetime of the window regardless of how many
-    // ephemeral subprocesses the agent spawns for hooks.
+    // Walk up the process tree and stop at the first IDE process (code.exe,
+    // cursor.exe, windsurf.exe). The inner per-window process is the first
+    // IDE exe encountered walking upward; the outer launcher process is the
+    // second. We want the inner one so each window gets a distinct surface token.
     let script = format!(
         r#"
-$stopNames = @('explorer.exe','wininit.exe','services.exe','svchost.exe','lsass.exe')
+$stopNames  = @('explorer.exe','wininit.exe','services.exe','svchost.exe','lsass.exe')
+$ideNames   = @('code.exe','cursor.exe','windsurf.exe')
 $procMap = @{{}}
 Get-CimInstance Win32_Process | ForEach-Object {{
     $procMap[[uint32]$_.ProcessId] = [PSCustomObject]@{{ ppid = [uint32]$_.ParentProcessId; name = $_.Name.ToLower() }}
 }}
 $cur = [uint32]{our_pid}
-$prevPid  = $null
-$prevName = $null
+$winPid  = $null
+$winName = $null
 for ($i = 0; $i -lt 30 -and $cur -gt 1; $i++) {{
     $entry = $procMap[$cur]
     if (-not $entry) {{ [Console]::Error.WriteLine("cc-walk: pid=$cur not in map, stopping"); break }}
     [Console]::Error.WriteLine("cc-walk: pid=$cur name=$($entry.name) ppid=$($entry.ppid)")
     if ($stopNames -contains $entry.name) {{ break }}
-    $prevPid  = $cur
-    $prevName = $entry.name -replace '\.exe$',''
+    if ($ideNames -contains $entry.name) {{
+        $winPid  = $cur
+        $winName = $entry.name -replace '\.exe$',''
+        break
+    }}
     $cur = $entry.ppid
 }}
-[Console]::Error.WriteLine("cc-walk: result name=$prevName pid=$prevPid")
-if ($prevPid) {{ Write-Output "$prevName|$prevPid" }}
+[Console]::Error.WriteLine("cc-walk: result name=$winName pid=$winPid")
+if ($winPid) {{ Write-Output "$winName|$winPid" }}
 "#
     );
 

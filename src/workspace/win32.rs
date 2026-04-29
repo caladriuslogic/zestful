@@ -200,15 +200,24 @@ pub fn focus_by_pid(pid: u32) {
     }
 }
 
-/// Walk the parent-process chain starting at `start_pid`, checking at each
-/// Code.exe ancestor whether it owns a visible top-level window. Returns the
-/// first such HWND, or — if none is found along the chain — the window owned
-/// by any Code.exe process as a last-resort fallback.
+/// Find the window belonging to the specific editor instance that contains
+/// `start_pid` in its process tree. Used for `workspace://code/window:<pid>`
+/// URIs where the number is the Node.js PID of a VS Code worker process
+/// (extension host, renderer, etc.), not a Win32 HWND.
 ///
-/// This is the right primitive for `workspace://code/window:<pid>` URIs where
-/// the embedded number is a Node.js process PID (extension host or renderer),
-/// not a Win32 HWND.
-pub fn find_ancestor_window(start_pid: u32, exe_name: &str) -> HWND {
+/// `project_hint` (the project folder name from the URI's `project:` segment)
+/// is used to disambiguate when a single Electron main process owns multiple
+/// BrowserWindow HWNDs — the window whose title contains the hint wins.
+///
+/// Strategy:
+/// 1. Collect ALL visible titled windows for all `exe_name` processes (not
+///    deduplicated by PID — a single Electron main process can own several).
+/// 2. Walk the parent-process chain from `start_pid`; at the first ancestor
+///    that owns windows, pick the one matching `project_hint` or the first.
+/// 3. If the chain never reaches a window-owner, match `project_hint` against
+///    all window titles globally.
+/// 4. Last resort: window whose owner PID is numerically nearest to `start_pid`.
+pub fn find_ancestor_window(start_pid: u32, exe_name: &str, project_hint: Option<&str>) -> HWND {
     let target = {
         let t = exe_name.to_lowercase();
         if t.ends_with(".exe") { t } else { format!("{}.exe", t) }
@@ -221,16 +230,41 @@ pub fn find_ancestor_window(start_pid: u32, exe_name: &str) -> HWND {
         .map(|(pid, _)| *pid)
         .collect();
 
-    // Walk up from start_pid; at each Code.exe ancestor try to find its window.
-    let mut cur = start_pid;
-    for _ in 0..8 {
-        if target_pids.contains(&cur) {
-            let mut s = HashSet::new();
-            s.insert(cur);
-            let hwnd = find_visible_window(&s);
-            if hwnd != 0 {
+    // Collect ALL visible titled windows — no dedup by PID so that a single
+    // Electron main process with multiple BrowserWindows yields multiple entries.
+    let all_windows = collect_titled_windows_for_pids(&target_pids);
+
+    match all_windows.len() {
+        0 => return 0,
+        1 => return all_windows[0].1,
+        _ => {}
+    }
+
+    // Build pid → Vec<(hwnd, title)> to handle multiple windows per PID.
+    let mut pid_windows: HashMap<u32, Vec<(HWND, String)>> = HashMap::new();
+    for &(pid, hwnd, ref title) in &all_windows {
+        pid_windows.entry(pid).or_default().push((hwnd, title.clone()));
+    }
+
+    // Given a candidate list, pick the best HWND using project_hint.
+    let pick = |candidates: &[(HWND, String)]| -> HWND {
+        if candidates.len() == 1 {
+            return candidates[0].0;
+        }
+        if let Some(hint) = project_hint {
+            let hint_lc = hint.to_lowercase();
+            if let Some(&(hwnd, _)) = candidates.iter().find(|(_, t)| t.to_lowercase().contains(&hint_lc)) {
                 return hwnd;
             }
+        }
+        candidates[0].0 // frontmost in EnumWindows Z-order
+    };
+
+    // Strategy 1: walk the parent chain from start_pid.
+    let mut cur = start_pid;
+    for _ in 0..12 {
+        if let Some(windows) = pid_windows.get(&cur) {
+            return pick(windows);
         }
         match proc_map.get(&cur) {
             Some((ppid, _)) if *ppid != 0 && *ppid != cur => cur = *ppid,
@@ -238,8 +272,21 @@ pub fn find_ancestor_window(start_pid: u32, exe_name: &str) -> HWND {
         }
     }
 
-    // Fallback: any visible window owned by any Code.exe process.
-    find_visible_window(&target_pids)
+    // Strategy 2: ancestor chain didn't reach a window-owning process.
+    // Match project_hint against all window titles.
+    if let Some(hint) = project_hint {
+        let hint_lc = hint.to_lowercase();
+        if let Some(&(_, hwnd, _)) = all_windows.iter().find(|(_, _, t)| t.to_lowercase().contains(&hint_lc)) {
+            return hwnd;
+        }
+    }
+
+    // Final fallback: window-owning process with PID nearest to start_pid.
+    all_windows
+        .iter()
+        .min_by_key(|(pid, _, _)| pid.abs_diff(start_pid))
+        .map(|(_, hwnd, _)| *hwnd)
+        .unwrap_or(0)
 }
 
 /// Bring a window to the foreground.
@@ -254,12 +301,15 @@ pub fn raise_window(hwnd: HWND) {
         if threads_differ {
             AttachThreadInput(fg_thread, tgt_thread, TRUE);
         }
-        ShowWindow(hwnd, SW_RESTORE);
-        // ShowWindow can silently fail on elevated (admin) windows when called from a
-        // non-elevated process. WM_SYSCOMMAND/SC_RESTORE is not in the UIPI block list,
-        // so PostMessageW succeeds where ShowWindow's internal message dispatch does not.
+        // Only restore if minimized — SW_RESTORE on a maximized window un-maximizes it.
         if IsIconic(hwnd) != FALSE {
-            PostMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE as usize, 0);
+            ShowWindow(hwnd, SW_RESTORE);
+            // If the window is still iconic after ShowWindow it is elevated and blocked by
+            // UIPI. WM_SYSCOMMAND/SC_RESTORE is not in the UIPI block list, so PostMessageW
+            // succeeds where ShowWindow's internal message dispatch does not.
+            if IsIconic(hwnd) != FALSE {
+                PostMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE as usize, 0);
+            }
         }
         SetForegroundWindow(hwnd);
         BringWindowToTop(hwnd);
@@ -377,6 +427,39 @@ fn find_wt_frame_for_pids(pids: &HashSet<u32>) -> HWND {
         EnumWindows(Some(cb), &mut state as *mut _ as LPARAM);
     }
     state.result
+}
+
+/// Collect ALL visible titled windows for the given PIDs — no deduplication.
+/// Returns `(pid, hwnd, title)` triples in EnumWindows (front-to-back) order.
+fn collect_titled_windows_for_pids(pids: &HashSet<u32>) -> Vec<(u32, HWND, String)> {
+    struct State {
+        pids: *const HashSet<u32>,
+        results: Vec<(u32, HWND, String)>,
+    }
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let state = &mut *(lparam as *mut State);
+        if IsWindowVisible(hwnd) == FALSE {
+            return TRUE;
+        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if !(*state.pids).contains(&pid) {
+            return TRUE;
+        }
+        let mut buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        if len <= 0 {
+            return TRUE;
+        }
+        let title = String::from_utf16_lossy(&buf[..len as usize]);
+        (*state).results.push((pid, hwnd, title));
+        TRUE
+    }
+    let mut state = State { pids: pids as *const _, results: Vec::new() };
+    unsafe {
+        EnumWindows(Some(cb), &mut state as *mut _ as LPARAM);
+    }
+    state.results
 }
 
 fn collect_windows_for_pids(pids: &HashSet<u32>) -> Vec<(u32, String)> {

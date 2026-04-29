@@ -74,27 +74,23 @@ pub async fn handle_focus(
     #[cfg(target_os = "windows")]
     {
         use vscode_family_windows::Family;
-        let is_vscode = lower == "vscode" || lower == "code" || lower.contains("visual studio code");
-        if is_vscode {
+        let family = if lower == "vscode" || lower == "code" || lower.contains("visual studio code") {
+            Some(Family::VSCode)
+        } else if lower == "cursor" {
+            Some(Family::Cursor)
+        } else if lower == "windsurf" {
+            Some(Family::Windsurf)
+        } else {
+            None
+        };
+        if let Some(fam) = family {
             if let Some(wid) = window_id {
-                return vscode_family_windows::focus_by_pid(wid).await;
+                return vscode_family_windows::focus_by_pid(fam, wid, project_id).await;
             }
             if let Some(tid) = terminal_id {
-                return vscode_family_windows::focus_terminal(Family::VSCode, tid).await;
+                return vscode_family_windows::focus_terminal(fam, tid).await;
             }
-            return vscode_family_windows::focus(Family::VSCode, project_id).await;
-        }
-        if lower == "cursor" {
-            if let Some(tid) = terminal_id {
-                return vscode_family_windows::focus_terminal(Family::Cursor, tid).await;
-            }
-            return vscode_family_windows::focus(Family::Cursor, project_id).await;
-        }
-        if lower == "windsurf" {
-            if let Some(tid) = terminal_id {
-                return vscode_family_windows::focus_terminal(Family::Windsurf, tid).await;
-            }
-            return vscode_family_windows::focus(Family::Windsurf, project_id).await;
+            return vscode_family_windows::focus(fam, project_id).await;
         }
     }
 

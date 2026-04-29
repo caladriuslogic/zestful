@@ -73,6 +73,13 @@ impl Family {
             Family::Windsurf => "Windsurf",
         }
     }
+    fn exe_name(self) -> &'static str {
+        match self {
+            Family::VSCode => "Code.exe",
+            Family::Cursor => "Cursor.exe",
+            Family::Windsurf => "Windsurf.exe",
+        }
+    }
 }
 
 pub fn detect_all() -> Result<Vec<IdeInstance>> {
@@ -169,23 +176,44 @@ fn window_folder(win: &Value) -> Option<String> {
     }
 }
 
-/// Focus a VS Code window by process ID. The `window:<n>` segment in
-/// `workspace://code/window:<n>` URIs carries the Node.js PID of the VS Code
-/// extension host (or renderer), not a Win32 HWND. Walk up the parent-process
-/// chain from that PID to the Code.exe ancestor that owns the visible window,
-/// then raise it.
-pub async fn focus_by_pid(window_id: &str) -> Result<()> {
+/// Focus an editor window by process ID.
+///
+/// If the Zestful VS Code extension has written a state file for this PID
+/// (`~/.config/zestful/vscode/<pid>.json`), we know the PID belongs to a real
+/// tracked window — walk up its ancestor chain to the outer Electron process
+/// that owns the Win32 HWND and raise it directly. This is more reliable than
+/// the CLI for Cursor/Windsurf which may open a new instance instead of
+/// focusing the existing one.
+pub async fn focus_by_pid(family: Family, window_id: &str, _project_id: Option<&str>) -> Result<()> {
     let pid: u32 = window_id
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid window pid: {}", window_id))?;
+    let exe = family.exe_name();
+    let cli = family.cli_name();
     tokio::task::spawn_blocking(move || {
-        let hwnd = crate::workspace::win32::find_ancestor_window(pid, "Code.exe");
-        if hwnd != 0 {
-            crate::workspace::win32::raise_window(hwnd);
+        if state_file_exists_for_pid(pid) {
+            // Walk up from the inner per-window process to the outer Electron
+            // process that owns the HWND for this specific window.
+            let hwnd = crate::workspace::win32::find_ancestor_window(pid, exe, None);
+            if hwnd != 0 {
+                crate::workspace::win32::raise_window(hwnd);
+                return;
+            }
         }
+        // Fallback: use the CLI (may open a new instance for some editors).
+        let _ = Command::new("cmd").args(["/c", cli]).spawn();
     })
     .await?;
     Ok(())
+}
+
+/// Returns true if the Zestful VS Code extension has a state file for this PID,
+/// confirming the PID belongs to a tracked editor window.
+fn state_file_exists_for_pid(pid: u32) -> bool {
+    crate::config::config_dir()
+        .join("vscode")
+        .join(format!("{}.json", pid))
+        .exists()
 }
 
 /// Open a URI in the Zestful VS Code extension's URI handler (for terminal focus).
