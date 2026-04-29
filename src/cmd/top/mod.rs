@@ -16,7 +16,7 @@ use tokio::time::interval;
 
 use app::{AppState, Connection, SideEffect};
 use client::{Client, StreamEvent};
-use keys::{key_to_action, Action};
+use keys::key_to_action;
 
 pub fn run() -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
