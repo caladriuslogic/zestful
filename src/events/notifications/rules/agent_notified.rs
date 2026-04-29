@@ -13,9 +13,6 @@ impl Rule for AgentNotified {
     fn id(&self) -> &'static str {
         "agent_notified"
     }
-    fn severity(&self) -> Severity {
-        Severity::Info
-    }
     fn evaluate(
         &self,
         tile: &Tile,

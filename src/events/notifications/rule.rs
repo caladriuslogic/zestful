@@ -25,10 +25,6 @@ pub trait Rule: Send + Sync {
     /// Stable identifier for this rule, e.g. "agent_completed".
     fn id(&self) -> &'static str;
 
-    /// Per-rule constant severity on day one. Future-compat: a rule
-    /// could override per-firing by moving severity into NotificationBody.
-    fn severity(&self) -> Severity;
-
     /// Evaluate this rule for a tile. `tile_events` is the per-tile
     /// event stream, ascending by received_at, filtered to events whose
     /// derived identity tuple matches this tile. `now_ms` is the current

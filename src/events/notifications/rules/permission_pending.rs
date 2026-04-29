@@ -13,9 +13,6 @@ impl Rule for PermissionPending {
     fn id(&self) -> &'static str {
         "permission_pending"
     }
-    fn severity(&self) -> Severity {
-        Severity::Urgent
-    }
     fn evaluate(
         &self,
         tile: &Tile,
