@@ -57,11 +57,16 @@ pub fn vscode_surface_token(window_pid: &str) -> String {
 
 /// Human-display label for a surface. Examples:
 /// - cli + "tmux:zestful/pane:%0" → "tmux [zestful:0]"
-/// - cli + "window:ttys000/tab:1" → "iTerm2 window ttys000 / tab 1"
+/// - cli + "window:ttys000/tab:1" + "iterm2" → "iTerm2 window ttys000 / tab 1"
+/// - cli + "window:ttys000/tab:1" + "terminal" → "Terminal window ttys000 / tab 1"
 /// - browser + "abc12345..." → "conversation abc12345…"
 /// - vscode + "vscode-window:1234" → "VS Code window 1234"
 /// Generic fallback if nothing matches: just return the token.
-pub fn surface_label(surface_kind: &str, surface_token: &str) -> String {
+///
+/// `app_slug` is the host segment of the originating `workspace://` URI (e.g.
+/// "iterm2", "terminal", "kitty"). Used to label window/tab surfaces correctly
+/// when multiple terminal apps share the same token format.
+pub fn surface_label(surface_kind: &str, surface_token: &str, app_slug: Option<&str>) -> String {
     match surface_kind {
         "cli" => {
             // Standalone Codex.app sentinel — produced by tiles::derive's
@@ -78,11 +83,18 @@ pub fn surface_label(surface_kind: &str, surface_token: &str) -> String {
             }
             if let Some(rest) = surface_token.strip_prefix("window:") {
                 if let Some((win, tab_part)) = rest.split_once("/tab:") {
-                    return format!("iTerm2 window {} / tab {}", win, tab_part);
+                    let app_name = match app_slug {
+                        Some("iterm2") => "iTerm2",
+                        Some("terminal") => "Terminal",
+                        Some("wezterm") => "WezTerm",
+                        Some("kitty") => "Kitty",
+                        _ => "Terminal",
+                    };
+                    return format!("{} window {} / tab {}", app_name, win, tab_part);
                 }
                 // Bare "window:<pid>" with no tab — in this codebase this is
-                // the Codex-in-VSCode case. (iTerm2 always emits
-                // window:X/tab:Y; Codex-in-VSCode produces window:<pid>.)
+                // the Codex-in-VSCode case. Terminal emulators always emit
+                // window:X/tab:Y; Codex-in-VSCode produces window:<pid>.
                 return format!("VS Code window {}", rest);
             }
             surface_token.to_string()
@@ -316,30 +328,46 @@ mod tests {
 
     #[test]
     fn surface_label_cli_tmux() {
-        assert_eq!(surface_label("cli", "tmux:zestful/pane:%0"), "tmux [zestful:0]");
+        assert_eq!(surface_label("cli", "tmux:zestful/pane:%0", None), "tmux [zestful:0]");
     }
 
     #[test]
     fn surface_label_cli_iterm() {
         assert_eq!(
-            surface_label("cli", "window:ttys000/tab:1"),
+            surface_label("cli", "window:ttys000/tab:1", Some("iterm2")),
             "iTerm2 window ttys000 / tab 1"
+        );
+    }
+
+    #[test]
+    fn surface_label_cli_terminal_app() {
+        assert_eq!(
+            surface_label("cli", "window:ttys000/tab:1", Some("terminal")),
+            "Terminal window ttys000 / tab 1"
+        );
+    }
+
+    #[test]
+    fn surface_label_cli_unknown_terminal_falls_back_to_terminal() {
+        assert_eq!(
+            surface_label("cli", "window:ttys000/tab:1", None),
+            "Terminal window ttys000 / tab 1"
         );
     }
 
     #[test]
     fn surface_label_cli_window_only_renders_as_vscode_window() {
         // Bare window:<pid> token (no /tab:) is produced only by the
-        // Codex-in-VSCode routing path. iTerm2 always emits window:X/tab:Y.
+        // Codex-in-VSCode routing path. Terminal emulators always emit window:X/tab:Y.
         assert_eq!(
-            surface_label("cli", "window:80836"),
+            surface_label("cli", "window:80836", None),
             "VS Code window 80836"
         );
     }
 
     #[test]
     fn surface_label_browser_truncates_long_slug() {
-        let label = surface_label("browser", "abc12345extra");
+        let label = surface_label("browser", "abc12345extra", None);
         assert!(label.contains("conversation"), "label = {}", label);
         // Should truncate to ~8 chars + ellipsis.
         assert!(label.contains("abc12345"), "label = {}", label);
@@ -347,12 +375,12 @@ mod tests {
 
     #[test]
     fn surface_label_vscode() {
-        assert_eq!(surface_label("vscode", "vscode-window:1234"), "VS Code window 1234");
+        assert_eq!(surface_label("vscode", "vscode-window:1234", None), "VS Code window 1234");
     }
 
     #[test]
     fn surface_label_unknown_kind_returns_token_as_is() {
-        assert_eq!(surface_label("alien", "something"), "something");
+        assert_eq!(surface_label("alien", "something", None), "something");
     }
 
     // --- project_label ---
@@ -415,18 +443,18 @@ mod tests {
     #[test]
     fn surface_label_browser_empty_token() {
         // Defensive: empty token shouldn't produce trailing space.
-        assert_eq!(surface_label("browser", ""), "conversation");
+        assert_eq!(surface_label("browser", "", None), "conversation");
     }
 
     #[test]
     fn surface_label_vscode_empty_pid() {
         // Defensive: empty pid in vscode-window: shouldn't produce trailing space.
-        assert_eq!(surface_label("vscode", "vscode-window:"), "VS Code window (unknown)");
+        assert_eq!(surface_label("vscode", "vscode-window:", None), "VS Code window (unknown)");
     }
 
     #[test]
     fn surface_label_cli_codex_renders_as_codex_app() {
-        assert_eq!(surface_label("cli", "codex"), "Codex.app");
+        assert_eq!(surface_label("cli", "codex", None), "Codex.app");
     }
 
     #[test]

@@ -43,6 +43,14 @@ pub fn group(rows: &[DerivedRow]) -> Vec<tile::Tile> {
             );
             let surface_kind = bucket[0].surface_kind.clone();
             let id = tile::id_for(&agent, &project_anchor, &surface_token);
+            // Extract the app slug from the focus URI (e.g. "terminal" from
+            // "workspace://terminal/window:282/tab:1") so surface_label can
+            // distinguish Terminal.app from iTerm2 and other terminal emulators.
+            let app_slug: Option<String> = focus_uri
+                .as_deref()
+                .and_then(|u| u.strip_prefix("workspace://"))
+                .and_then(|s| s.split('/').next())
+                .map(|s| s.to_string());
             tile::Tile {
                 id,
                 agent: agent.clone(),
@@ -50,7 +58,7 @@ pub fn group(rows: &[DerivedRow]) -> Vec<tile::Tile> {
                 project_label: surfaces::project_label(Some(&project_anchor)),
                 surface_kind: surface_kind.clone(),
                 surface_token: surface_token.clone(),
-                surface_label: surfaces::surface_label(&surface_kind, &surface_token),
+                surface_label: surfaces::surface_label(&surface_kind, &surface_token, app_slug.as_deref()),
                 first_seen_at,
                 last_seen_at,
                 event_count,
