@@ -68,8 +68,15 @@ pub fn run(agent: String, command: Vec<String>) -> Result<()> {
         false,
     );
 
-    // Also emit a structured event to the daemon. Best-effort, mirrors notify::run.
-    let envelopes = crate::events::map_cli_notify(&agent_name, &message, terminal_uri);
+    // Emit a structured watch.completed event to the daemon. Best-effort;
+    // event-emission failures are logged and swallowed.
+    let envelopes = crate::events::map_watch_completed(
+        &agent_name,
+        &cmd_name,
+        exit_code,
+        None,  // duration_ms — not tracked today; future addition
+        terminal_uri,
+    );
     if let Err(e) = crate::events::send_to_daemon(&envelopes) {
         crate::log::log("watch", &format!("event emission failed: {}", e));
     }
