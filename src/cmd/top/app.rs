@@ -168,10 +168,19 @@ impl AppState {
             }
 
             Action::EnterFilterMode => { self.input_mode = InputMode::Filter; }
-            Action::ExitFilterMode  => {
+            Action::CommitFilter    => {
+                // Keep the filter; return to Normal mode so navigation keys work.
                 self.input_mode = InputMode::Normal;
-                self.filter.clear();
-                self.selected = 0;
+            }
+            Action::ExitFilterMode  => {
+                // Cancel: priority is help → filter → no-op.
+                if self.help_open {
+                    self.help_open = false;
+                } else {
+                    self.input_mode = InputMode::Normal;
+                    self.filter.clear();
+                    self.selected = 0;
+                }
             }
             Action::FilterChar(c)   => {
                 self.filter.push(c);
@@ -395,6 +404,29 @@ mod tests {
         let mut s = fixture_state();
         s.apply(Action::Quit);
         assert!(s.should_quit);
+    }
+
+    #[test]
+    fn esc_closes_help_overlay_first_when_open() {
+        let mut s = fixture_state();
+        s.help_open = true;
+        s.input_mode = InputMode::Filter;
+        s.filter = "abc".to_string();
+        s.apply(Action::ExitFilterMode);
+        // Help closes, but filter and input_mode are preserved (help has priority).
+        assert!(!s.help_open);
+        assert_eq!(s.input_mode, InputMode::Filter);
+        assert_eq!(s.filter, "abc");
+    }
+
+    #[test]
+    fn commit_filter_keeps_query_and_returns_to_normal() {
+        let mut s = fixture_state();
+        s.input_mode = InputMode::Filter;
+        s.filter = "cla".to_string();
+        s.apply(Action::CommitFilter);
+        assert_eq!(s.input_mode, InputMode::Normal);
+        assert_eq!(s.filter, "cla");
     }
 
     #[test]

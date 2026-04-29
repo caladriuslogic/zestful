@@ -22,6 +22,7 @@ pub enum Action {
     EnterFilterMode,
     FilterChar(char),
     FilterBackspace,
+    CommitFilter,
     ExitFilterMode,
 
     // Actions
@@ -57,7 +58,7 @@ pub const HELP: &[HelpRow] = &[
 
     HelpRow { section: "Actions",    keys: "Enter",         description: "focus the selected tile (POST /focus)" },
     HelpRow { section: "Actions",    keys: "/",             description: "start filtering (fuzzy substring)" },
-    HelpRow { section: "Actions",    keys: "Esc",           description: "clear filter / cancel" },
+    HelpRow { section: "Actions",    keys: "Esc",           description: "close help · clear filter · cancel" },
     HelpRow { section: "Actions",    keys: "r",             description: "force-refresh now (in addition to live SSE)" },
     HelpRow { section: "Actions",    keys: "?",             description: "toggle this help overlay" },
     HelpRow { section: "Actions",    keys: "q / Ctrl-C",    description: "quit" },
@@ -77,7 +78,7 @@ pub fn key_to_action(ev: KeyEvent, mode: InputMode) -> Option<Action> {
     match mode {
         InputMode::Filter => match ev.code {
             KeyCode::Esc        => Some(Action::ExitFilterMode),
-            KeyCode::Enter      => Some(Action::ExitFilterMode),
+            KeyCode::Enter      => Some(Action::CommitFilter),
             KeyCode::Backspace  => Some(Action::FilterBackspace),
             KeyCode::Char(c)    => Some(Action::FilterChar(c)),
             _                   => None,
@@ -148,6 +149,11 @@ mod tests {
         assert_eq!(key_to_action(k(KeyCode::Char('/')), InputMode::Normal), Some(Action::EnterFilterMode));
         // In filter mode, '/' is just another char.
         assert_eq!(key_to_action(k(KeyCode::Char('/')), InputMode::Filter), Some(Action::FilterChar('/')));
+    }
+
+    #[test]
+    fn enter_in_filter_mode_commits_not_exits() {
+        assert_eq!(key_to_action(k(KeyCode::Enter), InputMode::Filter), Some(Action::CommitFilter));
     }
 
     #[test]
