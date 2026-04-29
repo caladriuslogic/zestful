@@ -5,6 +5,7 @@ mod app;
 mod client;
 mod colors;
 mod keys;
+mod ui;
 
 use anyhow::Result;
 
