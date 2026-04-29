@@ -96,8 +96,24 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
     // project-level URI synthesized from the payload for IDE-family agents.
     let terminal_uri = crate::workspace::locate().ok().or_else(|| {
         // Cursor hook: synthesize a workspace-level URI when the hook's
-        // parent chain doesn't reach the Cursor extension host.
+        // parent chain doesn't reach the Cursor extension host. Cursor spawns
+        // hooks from a sibling process of the extension host, so the ancestor
+        // walk misses windowPid. Match the state file by workspace root instead
+        // so we can include window:<pid> — without it cli_surface_token returns
+        // None and tiles::derive() produces no tile.
         if agent_kind == crate::hooks::AgentKind::Cursor && !project.is_empty() {
+            let workspace_root = payload
+                .get("workspace_roots")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.as_str())
+                .or_else(|| payload.get("cwd").and_then(|v| v.as_str()));
+            if let Some(pid) = workspace_root.and_then(cursor_window_pid_for_workspace) {
+                return Some(format!(
+                    "workspace://cursor/window:{}/project:{}",
+                    pid, project
+                ));
+            }
             return Some(format!("workspace://cursor/project:{}", project));
         }
         None
@@ -140,6 +156,40 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Find the windowPid of a Cursor window whose workspaceFolder matches `workspace_root`.
+/// Reads all `~/.config/zestful/vscode/*.json` state files written by the extension.
+fn cursor_window_pid_for_workspace(workspace_root: &str) -> Option<u32> {
+    let dir = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)?
+        .join(".config/zestful/vscode");
+    let entries = std::fs::read_dir(&dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) else {
+            continue;
+        };
+        if val.get("appName").and_then(|v| v.as_str()) != Some("Cursor") {
+            continue;
+        }
+        if val
+            .get("workspaceFolder")
+            .and_then(|v| v.as_str())
+            == Some(workspace_root)
+        {
+            if let Some(pid) = val.get("windowPid").and_then(|v| v.as_u64()) {
+                return Some(pid as u32);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
