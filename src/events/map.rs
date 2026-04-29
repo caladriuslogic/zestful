@@ -912,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn map_cli_notify_returns_one_envelope_with_correct_shape() {
+    fn map_cli_notify_returns_one_envelope() {
         let envs = map_cli_notify("test-agent", "hello world", None);
         assert_eq!(envs.len(), 1);
         let e = &envs[0];
@@ -936,6 +936,12 @@ mod tests {
         assert_eq!(e.source_pid, std::process::id());
         assert_eq!(e.seq, 0);
         assert!(e.correlation.is_none());
+    }
+
+    #[test]
+    fn map_cli_notify_no_correlation() {
+        let envs = map_cli_notify("a", "m", None);
+        assert!(envs[0].correlation.is_none());
     }
 
     #[test]
