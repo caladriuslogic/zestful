@@ -138,6 +138,9 @@ enum Commands {
         json: bool,
     },
 
+    /// Live agent TUI. Network-only client of the daemon's HTTP+SSE API.
+    Top,
+
     /// Read the notifications projection from the local event store.
     Notifications {
         /// Filter to a single agent slug.
@@ -172,6 +175,7 @@ fn main() -> anyhow::Result<()> {
             | Commands::Events { .. }
             | Commands::Tiles { .. }
             | Commands::Notifications { .. }
+            | Commands::Top
     ) {
         config::ensure_daemon();
     }
@@ -216,5 +220,7 @@ fn main() -> anyhow::Result<()> {
             since,
             json,
         } => cmd::notifications::run(agent, rule, severity, since, json),
+
+        Commands::Top => cmd::top::run(),
     }
 }

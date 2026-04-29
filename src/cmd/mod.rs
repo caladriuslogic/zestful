@@ -10,4 +10,5 @@ pub mod notify;
 pub mod ssh;
 pub mod test_focus;
 pub mod tiles;
+pub mod top;
 pub mod watch;
