@@ -39,6 +39,9 @@ pub enum Payload {
     #[serde(rename = "agent.notified")]
     AgentNotified(AgentNotified),
 
+    #[serde(rename = "watch.completed")]
+    WatchCompleted(WatchCompleted),
+
     #[serde(rename = "session.started")]
     SessionStarted(SessionStarted),
 }
@@ -54,6 +57,7 @@ impl Payload {
             Payload::ToolCompleted(_) => "tool.completed",
             Payload::PermissionRequested(_) => "permission.requested",
             Payload::AgentNotified(_) => "agent.notified",
+            Payload::WatchCompleted(_) => "watch.completed",
             Payload::SessionStarted(_) => "session.started",
         }
     }
@@ -70,6 +74,7 @@ impl Payload {
             Payload::ToolCompleted(p) => serde_json::to_value(p).unwrap_or_default(),
             Payload::PermissionRequested(p) => serde_json::to_value(p).unwrap_or_default(),
             Payload::AgentNotified(p) => serde_json::to_value(p).unwrap_or_default(),
+            Payload::WatchCompleted(p) => serde_json::to_value(p).unwrap_or_default(),
             Payload::SessionStarted(p) => serde_json::to_value(p).unwrap_or_default(),
         }
     }
@@ -144,6 +149,16 @@ pub struct AgentNotified {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct WatchCompleted {
+    pub command: String,
+    pub exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SessionStarted {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_session_id: Option<String>,
@@ -188,6 +203,10 @@ mod tests {
                 Payload::SessionStarted(SessionStarted::default()),
                 "session.started",
             ),
+            (
+                Payload::WatchCompleted(WatchCompleted::default()),
+                "watch.completed",
+            ),
         ];
         for (p, tag) in cases {
             assert_eq!(p.type_str(), tag);
@@ -229,6 +248,52 @@ mod tests {
         // All fields are Optional; body should be an empty object
         assert!(body.is_object());
         assert_eq!(body.as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn watch_completed_round_trip() {
+        let p = Payload::WatchCompleted(WatchCompleted {
+            command: "npm".into(),
+            exit_code: 1,
+            duration_ms: Some(5000),
+            message: Some("npm test failed".into()),
+        });
+        assert_eq!(p.type_str(), "watch.completed");
+        let body = p.to_body_value();
+        assert!(body.get("type").is_none(), "body must not include tag");
+        assert_eq!(body["command"], "npm");
+        assert_eq!(body["exit_code"], 1);
+        assert_eq!(body["duration_ms"], 5000);
+        assert_eq!(body["message"], "npm test failed");
+    }
+
+    #[test]
+    fn watch_completed_minimal_omits_optional_fields() {
+        let p = Payload::WatchCompleted(WatchCompleted {
+            command: "true".into(),
+            exit_code: 0,
+            duration_ms: None,
+            message: None,
+        });
+        let body = p.to_body_value();
+        assert_eq!(body["command"], "true");
+        assert_eq!(body["exit_code"], 0);
+        assert!(body.get("duration_ms").is_none());
+        assert!(body.get("message").is_none());
+    }
+
+    #[test]
+    fn watch_completed_serializes_with_type_tag() {
+        let p = Payload::WatchCompleted(WatchCompleted {
+            command: "ls".into(),
+            exit_code: 0,
+            duration_ms: None,
+            message: None,
+        });
+        let v: serde_json::Value = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["type"], "watch.completed");
+        assert_eq!(v["command"], "ls");
+        assert_eq!(v["exit_code"], 0);
     }
 
     #[test]
