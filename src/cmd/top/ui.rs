@@ -1,7 +1,7 @@
 //! ratatui rendering. Pure functions over `&AppState`.
 
 use crate::cmd::top::app::{AppState, Connection, Pane};
-use crate::cmd::top::colors::{BRAND_ORANGE, BRAND_ORANGE_LIGHT};
+use crate::cmd::top::colors::{self, BRAND_ORANGE, BRAND_ORANGE_LIGHT};
 use crate::cmd::top::keys::InputMode;
 use ratatui::{
     Frame,
@@ -41,12 +41,14 @@ pub fn draw_header(f: &mut Frame, area: Rect, _state: &AppState) {
 }
 
 pub fn draw_status_bar(f: &mut Frame, area: Rect, state: &AppState) {
-    // Left side: connection state + counts.
-    let (dot, dot_color, label) = match &state.connection {
-        Connection::Live           => ("●", Color::Rgb(0x10, 0xB9, 0x81), "live"),
-        Connection::Reconnecting   => ("◐", Color::Rgb(0xEA, 0xB3, 0x08), "reconnecting…"),
-        Connection::Offline(_)     => ("○", Color::Rgb(0xEF, 0x44, 0x44), "offline"),
+    // Left side: connection state + counts. Pull colors from the shared
+    // `colors` module so chrome and per-state hues stay in sync.
+    let (dot, label, color_state) = match &state.connection {
+        Connection::Live         => ("●", "live",          colors::ConnectionState::Live),
+        Connection::Reconnecting => ("◐", "reconnecting…", colors::ConnectionState::Reconnecting),
+        Connection::Offline(_)   => ("○", "offline",       colors::ConnectionState::Offline),
     };
+    let dot_color = colors::connection_color(color_state);
     let counts = format!("{} tiles · {} notifs", state.tiles.len(), state.notifications.len());
 
     let left = Line::from(vec![
