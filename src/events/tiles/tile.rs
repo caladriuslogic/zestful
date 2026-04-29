@@ -1,8 +1,8 @@
 //! Tile struct + deterministic ID derivation.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Tile {
     /// Deterministic ID — "tile_<16 hex chars>" derived from identity tuple.
     pub id: String,

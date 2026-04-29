@@ -1,9 +1,9 @@
 //! Notification struct + id_for helper.
 
 use crate::events::notifications::rule::Severity;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Notification {
     /// Deterministic ID — "notif_<16 hex chars>" derived from (rule_id, tile_id).
     pub id: String,
