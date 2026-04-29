@@ -134,6 +134,8 @@ fn generic(event: &str, payload: &Value) -> Vec<Payload> {
     vec![Payload::AgentNotified(AgentNotified {
         kind: "other".into(),
         message: hook_msg.or(Some(msg)),
+        severity_hint: None,
+        push_hint: None,
     })]
 }
 
@@ -202,6 +204,8 @@ fn agent_notified(kind: &str, payload: &Value) -> Payload {
     Payload::AgentNotified(AgentNotified {
         kind: kind.to_string(),
         message,
+        severity_hint: None,
+        push_hint: None,
     })
 }
 
