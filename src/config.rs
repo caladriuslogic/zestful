@@ -136,8 +136,34 @@ pub fn ensure_daemon() {
         .stderr(std::process::Stdio::null())
         .spawn();
 
-    // Brief wait for daemon startup
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Poll /health until the daemon is accepting connections, up to 2s.
+    // A blind sleep is not enough when SQLite migration or port bind is slow.
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if daemon_is_healthy(DAEMON_PORT) {
+            return;
+        }
+    }
+}
+
+fn daemon_is_healthy(port: u16) -> bool {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+    let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{}", port)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+    let req = format!(
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        port
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 32];
+    matches!(stream.read(&mut buf), Ok(n) if n > 0 && buf.starts_with(b"HTTP/1.1 200"))
 }
 
 /// Check if a process is alive.
