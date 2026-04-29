@@ -280,11 +280,11 @@ mod tests {
     async fn stream_emits_initial_then_projection_changed() {
         // Mount the real daemon's /stream handler so we exercise the
         // actual SSE protocol the macOS app consumes. This is the
-        // contract-validation point.
+        // contract-validation point. The handler does not touch the
+        // events store — only the broadcast channel — so we don't init
+        // the store here. (Init is a OnceLock and would panic if a prior
+        // serial test already initialized it.)
         std::env::set_var("ZESTFUL_TOKEN_OVERRIDE", "x");
-        use tempfile::NamedTempFile;
-        let f = NamedTempFile::new().unwrap();
-        crate::events::store::init(f.path()).expect("store init");
 
         let app = axum::Router::new().route("/stream", axum::routing::get(crate::cmd::daemon::handle_stream));
 
