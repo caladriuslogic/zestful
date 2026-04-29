@@ -5,6 +5,7 @@
 //! inspector for click-to-focus.
 
 use crate::config;
+use crate::events::severity::Severity;
 use anyhow::Result;
 use serde::Serialize;
 
@@ -79,9 +80,9 @@ pub fn run(
     // Map --severity (info|warning|urgent) → Severity enum, passing as a hint.
     // The clap default is "warning" so we always send Some.
     let severity_hint = match severity.as_str() {
-        "info" => Some(crate::events::severity::Severity::Info),
-        "warning" => Some(crate::events::severity::Severity::Warn),
-        "urgent" => Some(crate::events::severity::Severity::Urgent),
+        "info" => Some(Severity::Info),
+        "warning" => Some(Severity::Warn),
+        "urgent" => Some(Severity::Urgent),
         _ => None,  // unrecognized — defer to rule's fallback
     };
     let push_hint = if no_push { Some(false) } else { None };
