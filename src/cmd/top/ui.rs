@@ -23,7 +23,12 @@ pub fn draw(f: &mut Frame, state: &AppState) {
         .split(area);
 
     draw_header(f, chunks[0], state);
-    // body — filled in by Tasks 9–10
+    let body_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(chunks[1]);
+    draw_tiles_list(f, body_chunks[0], state);
+    draw_detail_pane(f, body_chunks[1], state);
     draw_status_bar(f, chunks[2], state);
 }
 
@@ -85,6 +90,176 @@ pub fn draw_status_bar(f: &mut Frame, area: Rect, state: &AppState) {
 pub fn draw_help_overlay(_f: &mut Frame, _state: &AppState) { /* Task 10 */ }
 pub fn draw_empty_state(_f: &mut Frame, _area: Rect, _state: &AppState) { /* Task 9/10 */ }
 
+pub fn draw_tiles_list(f: &mut Frame, area: Rect, state: &AppState) {
+    use crate::cmd::top::colors::agent_color;
+    let visible = state.visible_tiles();
+    let now_ms = now_ms();
+
+    // Border highlights when this pane is focused.
+    let border_style = if state.focused_pane == Pane::TilesList {
+        Style::default().fg(BRAND_ORANGE)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(" AGENTS ", Style::default().add_modifier(Modifier::BOLD)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if visible.is_empty() {
+        let msg = if state.tiles.is_empty() {
+            empty_message(state)
+        } else {
+            "No tiles match the current filter.".to_string()
+        };
+        f.render_widget(Paragraph::new(msg).style(Style::default().fg(Color::Gray)), inner);
+        return;
+    }
+
+    // Notification tile-id set for the ⚠ glyph.
+    let notif_ids: std::collections::HashSet<&str> =
+        state.notifications.iter().map(|n| n.tile_id.as_str()).collect();
+
+    let mut lines: Vec<Line> = Vec::with_capacity(visible.len());
+    for (idx, t) in visible.iter().enumerate() {
+        let cursor = if idx == state.selected { "▶ " } else { "  " };
+        let glyph = if notif_ids.contains(t.id.as_str()) {
+            Span::styled(" ⚠", Style::default().fg(Color::Rgb(0xF5, 0x9E, 0x0A)))
+        } else {
+            Span::raw("  ")
+        };
+        let agent_style = Style::default().fg(agent_color(&t.agent)).add_modifier(Modifier::BOLD);
+        let project = t.project_label.as_deref().unwrap_or("-");
+        let last = relative_time(t.last_seen_at, now_ms);
+        lines.push(Line::from(vec![
+            Span::styled(cursor, Style::default().fg(agent_color(&t.agent))),
+            Span::styled(format!("{:<14}", truncate(&t.agent, 14)), agent_style),
+            Span::raw(" "),
+            Span::raw(format!("{:<10}", truncate(project, 10))),
+            Span::raw(" "),
+            Span::styled(format!("{:>4}", last), Style::default().fg(Color::DarkGray)),
+            glyph,
+        ]));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+pub fn draw_detail_pane(f: &mut Frame, area: Rect, state: &AppState) {
+    use crate::cmd::top::app::sparkline_glyphs;
+    let border_style = if state.focused_pane == Pane::Detail {
+        Style::default().fg(BRAND_ORANGE)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let title = state.selected_tile()
+        .map(|t| format!(" {} · {} ", t.agent, t.project_label.as_deref().unwrap_or("-")))
+        .unwrap_or_else(|| " — ".to_string());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(title, Style::default().add_modifier(Modifier::BOLD)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let Some(t) = state.selected_tile() else {
+        let msg = "No tile selected.";
+        f.render_widget(Paragraph::new(msg).style(Style::default().fg(Color::Gray)), inner);
+        return;
+    };
+
+    // Stack: surface_label · counts · sparkline · recent · notifications
+    let now = now_ms();
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(Span::styled(t.surface_label.clone(), Style::default().fg(Color::Cyan))));
+    lines.push(Line::from(format!(
+        "{} events · first {} ago · last {} ago",
+        t.event_count,
+        relative_time(t.first_seen_at, now),
+        relative_time(t.last_seen_at, now),
+    )));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled("Activity (last hour)", Style::default().add_modifier(Modifier::BOLD))));
+    let bins = crate::cmd::top::app::sparkline_bins(&state.recent_events, now);
+    lines.push(Line::from(Span::styled(
+        sparkline_glyphs(&bins),
+        Style::default().fg(Color::Rgb(0x60, 0xA5, 0xFA)),
+    )));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled("Recent", Style::default().add_modifier(Modifier::BOLD))));
+    if state.recent_events.is_empty() {
+        lines.push(Line::from(Span::styled("  (no events)", Style::default().fg(Color::DarkGray))));
+    } else {
+        for e in state.recent_events.iter().take(8) {
+            let when = relative_time(e.event_ts, now);
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:>5}  ", when), Style::default().fg(Color::DarkGray)),
+                Span::raw(e.event_type.clone()),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+
+    let notifs = state.notifications_for_selected();
+    lines.push(Line::from(Span::styled("Notifications", Style::default().add_modifier(Modifier::BOLD))));
+    if notifs.is_empty() {
+        lines.push(Line::from(Span::styled("  (none)", Style::default().fg(Color::DarkGray))));
+    } else {
+        for n in notifs {
+            let glyph = match n.severity {
+                crate::events::notifications::rule::Severity::Info   => "·",
+                crate::events::notifications::rule::Severity::Warn   => "⚠",
+                crate::events::notifications::rule::Severity::Urgent => "!",
+            };
+            let when = relative_time(n.triggered_at_ms, now);
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(glyph, Style::default().fg(Color::Rgb(0xF5, 0x9E, 0x0A))),
+                Span::raw(format!("  {}  ", n.message)),
+                Span::styled(when, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Same algorithm as `cmd/tiles.rs:relative_time` — kept duplicated here
+/// to avoid making `cmd::tiles::relative_time` pub. Trivial enough that
+/// duplication is the right call.
+fn relative_time(then_ms: i64, now_ms: i64) -> String {
+    let delta = (now_ms - then_ms).max(0);
+    if delta < 60_000     { return format!("{}s",  delta / 1000); }
+    if delta < 3_600_000  { return format!("{}m",  delta / 60_000); }
+    if delta < 86_400_000 { return format!("{}h",  delta / 3_600_000); }
+    format!("{}d", delta / 86_400_000)
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { return s.to_string(); }
+    let cut: String = s.chars().take(n.saturating_sub(1)).collect();
+    format!("{}…", cut)
+}
+
+fn empty_message(state: &AppState) -> String {
+    match &state.connection {
+        Connection::Offline(reason) => format!("Daemon not reachable: {}.\nPress r to retry.", reason),
+        Connection::Reconnecting    => "Reconnecting to daemon…".to_string(),
+        Connection::Live            => "No agent activity in the last 24h.\nListening for new events…".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +317,65 @@ mod tests {
         assert!(row.contains("●"));
         assert!(row.contains("0 tiles"));
         assert!(row.contains("0 notifs"));
+    }
+
+    use crate::events::tiles::tile::Tile;
+
+    fn fake_tile(agent: &str, project: &str, surface: &str) -> Tile {
+        Tile {
+            id: format!("tile_{}", agent),
+            agent: agent.to_string(),
+            project_anchor: Some(project.to_string()),
+            project_label: Some(project.to_string()),
+            surface_kind: "cli".to_string(),
+            surface_token: surface.to_string(),
+            surface_label: surface.to_string(),
+            first_seen_at: 0,
+            last_seen_at: 1_000,
+            event_count: 5,
+            latest_event_type: "turn.completed".to_string(),
+            focus_uri: Some("workspace://x".to_string()),
+        }
+    }
+
+    #[test]
+    fn tiles_list_shows_cursor_on_selected_row() {
+        let mut state = AppState::new();
+        state.tiles = vec![fake_tile("claude-code", "zestful", "tmux:z/pane:%0")];
+        state.connection = Connection::Live;
+        let buf = render(&state, 80, 10);
+        // Body starts at row 1. The first tile row should have ▶ near the start.
+        let row1: String = (0..40).map(|x| buf.cell((x, 2)).unwrap().symbol().to_string()).collect::<Vec<_>>().join("");
+        assert!(row1.contains("▶"), "expected ▶ cursor, got: {}", row1);
+        assert!(row1.contains("claude-code"));
+    }
+
+    #[test]
+    fn detail_pane_shows_no_tile_selected_when_empty() {
+        let state = AppState::new();
+        let buf = render(&state, 80, 10);
+        // Right pane spans cols ~28..80 (35% / 65% split of 80 cols).
+        // Body occupies rows 1..9; top border at row 1, inner content starts at row 2.
+        let mut found = false;
+        for y in 1..9u16 {
+            let row: String = (0..80).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect::<Vec<_>>().join("");
+            if row.contains("No tile selected") { found = true; break; }
+        }
+        assert!(found, "expected 'No tile selected' somewhere in detail pane body rows");
+    }
+
+    #[test]
+    fn detail_pane_shows_metadata_for_selected() {
+        let mut state = AppState::new();
+        state.tiles = vec![fake_tile("claude-code", "zestful", "tmux:z/pane:%0")];
+        state.connection = Connection::Live;
+        let buf = render(&state, 100, 12);
+        // Look for surface_label somewhere in the right pane.
+        let mut found = false;
+        for y in 1..11 {
+            let row: String = (0..100).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect::<Vec<_>>().join("");
+            if row.contains("tmux:z/pane:%0") { found = true; break; }
+        }
+        assert!(found, "expected surface_label in detail pane");
     }
 }
