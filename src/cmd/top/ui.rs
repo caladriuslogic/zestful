@@ -11,8 +11,20 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
+/// Cap the rendered body width so the TUI doesn't sprawl across an
+/// ultrawide terminal. Wider terminals get empty gutter on either side.
+const MAX_BODY_WIDTH: u16 = 120;
+
+/// Compute the centered, max-width-capped area within the given frame
+/// rect. If the frame is narrower than `MAX_BODY_WIDTH`, returns it as-is.
+fn centered_area(full: Rect) -> Rect {
+    if full.width <= MAX_BODY_WIDTH { return full; }
+    let gutter = (full.width - MAX_BODY_WIDTH) / 2;
+    Rect::new(full.x + gutter, full.y, MAX_BODY_WIDTH, full.height)
+}
+
 pub fn draw(f: &mut Frame, state: &AppState) {
-    let area = f.area();
+    let area = centered_area(f.area());
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -91,7 +103,7 @@ pub fn draw_status_bar(f: &mut Frame, area: Rect, state: &AppState) {
 pub fn draw_help_overlay(f: &mut Frame, state: &AppState) {
     use crate::cmd::top::keys::HELP;
     if !state.help_open { return; }
-    let area = f.area();
+    let area = centered_area(f.area());
 
     // Centered modal — 70% wide, 75% tall (capped to content needs).
     let w = (area.width as f32 * 0.70) as u16;
@@ -138,7 +150,7 @@ pub fn draw_help_overlay(f: &mut Frame, state: &AppState) {
 
 pub fn draw_toast(f: &mut Frame, state: &AppState) {
     let Some((msg, _)) = &state.toast else { return; };
-    let area = f.area();
+    let area = centered_area(f.area());
     // Render as a one-line strip at row h-2 (just above the status bar),
     // right-aligned within the full width with brand-orange foreground.
     if area.height < 3 { return; }
@@ -339,6 +351,33 @@ mod tests {
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| draw(f, state)).unwrap();
         term.backend().buffer().clone()
+    }
+
+    #[test]
+    fn centered_area_caps_at_max_body_width() {
+        // Below cap: full width.
+        let r = centered_area(Rect::new(0, 0, 80, 30));
+        assert_eq!(r.width, 80);
+        assert_eq!(r.x, 0);
+        // Above cap: capped + centered.
+        let r = centered_area(Rect::new(0, 0, 200, 30));
+        assert_eq!(r.width, MAX_BODY_WIDTH);
+        assert_eq!(r.x, (200 - MAX_BODY_WIDTH) / 2);
+    }
+
+    #[test]
+    fn ultrawide_terminal_leaves_empty_gutter() {
+        // On a 200-col terminal, the brand mark sits at the gutter offset,
+        // not at column 0.
+        let state = AppState::new();
+        let buf = render(&state, 200, 5);
+        let gutter = (200 - MAX_BODY_WIDTH) / 2;
+        // The leading "▌" of the brand mark should be at column `gutter`.
+        let cell = buf.cell((gutter as u16, 0)).unwrap();
+        assert_eq!(cell.symbol(), "▌", "brand mark should start at gutter column {}", gutter);
+        // And column 0 should be empty (just default bg).
+        let edge = buf.cell((0, 0)).unwrap();
+        assert_eq!(edge.symbol(), " ", "left gutter should be blank");
     }
 
     #[test]
