@@ -46,8 +46,36 @@ pub fn init(path: &Path) -> rusqlite::Result<()> {
 
 /// Acquire the process-global connection. Panics if `init` wasn't called.
 /// Internal use only — callers should go through write/query/prune.
-pub(crate) fn conn() -> &'static Mutex<Connection> {
+///
+/// Visibility: widened from `pub(crate)` to `pub` so cross-module
+/// integration tests (e.g. `scraper::tests`) can verify db state directly
+/// after running the dispatch loop end-to-end.
+pub fn conn() -> &'static Mutex<Connection> {
     CONNECTION.get().expect("events::store::init() must be called first")
+}
+
+/// Test-only init: open an in-memory SQLite, run migrations, and store
+/// it in the `CONNECTION` OnceLock. Safe to call from many tests in the
+/// same process — `Once::call_once` ensures we attempt the init at most
+/// once.
+///
+/// If another test (e.g. `cmd::daemon::tests::app`) has already populated
+/// `CONNECTION` via real `init()`, the `CONNECTION.set` call here returns
+/// Err and the in-memory connection is silently dropped. That's
+/// intentional: any pre-existing CONNECTION already has migrations
+/// applied (because `init()` runs them) and the same `events` schema, so
+/// integration tests that just need a working store can proceed.
+#[cfg(test)]
+pub fn init_for_tests() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let conn = Connection::open_in_memory().expect("open_in_memory");
+        // Apply same PRAGMAs as init() (in-memory ignores some, that's fine).
+        let _ = conn.pragma_update(None, "foreign_keys", "ON");
+        schema::run_migrations(&conn).expect("migrations should succeed in tests");
+        let _ = CONNECTION.set(Mutex::new(conn));
+    });
 }
 
 static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
