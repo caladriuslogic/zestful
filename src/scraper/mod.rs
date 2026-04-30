@@ -5,6 +5,7 @@
 //! On by default; disable via settings key `scraper.enabled = false`.
 
 mod state;
+mod discovery;
 pub mod parsers;
 pub mod pricing;
 
