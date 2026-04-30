@@ -11,16 +11,22 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-/// Cap the rendered body width so the TUI doesn't sprawl across an
-/// ultrawide terminal. Wider terminals get empty gutter on either side.
+/// Cap the rendered body so the TUI doesn't sprawl across an oversized
+/// terminal. Anything larger than `MAX_BODY_WIDTH × MAX_BODY_HEIGHT` gets
+/// empty gutter around the centered content.
 const MAX_BODY_WIDTH: u16 = 120;
+const MAX_BODY_HEIGHT: u16 = 25;
 
-/// Compute the centered, max-width-capped area within the given frame
-/// rect. If the frame is narrower than `MAX_BODY_WIDTH`, returns it as-is.
+/// Compute the centered, capped area within the given frame rect. On
+/// either axis, if the frame is at-or-below the cap, that axis is used
+/// as-is; if it exceeds the cap, the area is shrunk to the cap and
+/// centered (with floor-rounded gutter on each side).
 fn centered_area(full: Rect) -> Rect {
-    if full.width <= MAX_BODY_WIDTH { return full; }
-    let gutter = (full.width - MAX_BODY_WIDTH) / 2;
-    Rect::new(full.x + gutter, full.y, MAX_BODY_WIDTH, full.height)
+    let w = full.width.min(MAX_BODY_WIDTH);
+    let h = full.height.min(MAX_BODY_HEIGHT);
+    let x = full.x + (full.width - w) / 2;
+    let y = full.y + (full.height - h) / 2;
+    Rect::new(x, y, w, h)
 }
 
 pub fn draw(f: &mut Frame, state: &AppState) {
@@ -354,15 +360,25 @@ mod tests {
     }
 
     #[test]
-    fn centered_area_caps_at_max_body_width() {
-        // Below cap: full width.
-        let r = centered_area(Rect::new(0, 0, 80, 30));
-        assert_eq!(r.width, 80);
-        assert_eq!(r.x, 0);
-        // Above cap: capped + centered.
-        let r = centered_area(Rect::new(0, 0, 200, 30));
+    fn centered_area_caps_each_axis_independently() {
+        // Both axes at-or-below cap: full size, no offset.
+        let r = centered_area(Rect::new(0, 0, 80, 20));
+        assert_eq!((r.x, r.y, r.width, r.height), (0, 0, 80, 20));
+        // Width over cap, height under: cap + center on x only.
+        let r = centered_area(Rect::new(0, 0, 200, 20));
         assert_eq!(r.width, MAX_BODY_WIDTH);
         assert_eq!(r.x, (200 - MAX_BODY_WIDTH) / 2);
+        assert_eq!((r.y, r.height), (0, 20));
+        // Height over cap, width under: cap + center on y only.
+        let r = centered_area(Rect::new(0, 0, 80, 40));
+        assert_eq!(r.height, MAX_BODY_HEIGHT);
+        assert_eq!(r.y, (40 - MAX_BODY_HEIGHT) / 2);
+        assert_eq!((r.x, r.width), (0, 80));
+        // Both over cap: cap + center on both.
+        let r = centered_area(Rect::new(0, 0, 200, 40));
+        assert_eq!((r.width, r.height), (MAX_BODY_WIDTH, MAX_BODY_HEIGHT));
+        assert_eq!(r.x, (200 - MAX_BODY_WIDTH) / 2);
+        assert_eq!(r.y, (40 - MAX_BODY_HEIGHT) / 2);
     }
 
     #[test]
