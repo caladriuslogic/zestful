@@ -45,8 +45,8 @@ pub fn map_hook_payload(
     };
 
     // Wrap each Payload in a full Envelope with shared envelope fields.
-    let host = hostname();
-    let os_user = os_user();
+    let host = crate::events::device::host();
+    let os_user = crate::events::device::os_user();
     let device = device::device_id();
     let source = source_slug(agent);
     let source_pid = std::process::id();
@@ -159,8 +159,8 @@ pub fn map_cli_notify(
     severity_hint: Option<Severity>,
     push_hint: Option<bool>,
 ) -> Vec<Envelope> {
-    let host = hostname();
-    let os_user = os_user();
+    let host = crate::events::device::host();
+    let os_user = crate::events::device::os_user();
     let device = device::device_id();
     let source_pid = std::process::id();
     let ts = now_unix_ms();
@@ -232,8 +232,8 @@ pub fn map_watch_completed(
     duration_ms: Option<u64>,
     focus_uri: Option<String>,
 ) -> Vec<Envelope> {
-    let host = hostname();
-    let os_user = os_user();
+    let host = crate::events::device::host();
+    let os_user = crate::events::device::os_user();
     let device = device::device_id();
     let source_pid = std::process::id();
     let ts = now_unix_ms();
@@ -377,29 +377,6 @@ fn permission_requested(payload: &Value) -> Payload {
 }
 
 // ---------- envelope field helpers ----------
-
-fn hostname() -> String {
-    if let Ok(name) = std::env::var("HOSTNAME") {
-        if !name.is_empty() {
-            return name;
-        }
-    }
-    if let Ok(output) = std::process::Command::new("hostname").output() {
-        if output.status.success() {
-            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !s.is_empty() {
-                return s;
-            }
-        }
-    }
-    "unknown".into()
-}
-
-fn os_user() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "unknown".into())
-}
 
 fn source_slug(agent: AgentKind) -> String {
     agent.slug().to_string()

@@ -96,10 +96,20 @@ pub fn deterministic_envelope_id(
 
 /// Emit one envelope through the daemon's existing insert + broadcast path.
 /// Synchronous DB write is wrapped by the caller in spawn_blocking.
+///
+/// Mirrors the work the HTTP /events handler does in cmd/daemon.rs minus
+/// validate_envelope (we trust build_envelope's output): insert, fire the
+/// prune-check counter, broadcast. Without the prune-check call, scraper
+/// writes wouldn't tick WRITE_COUNTER and the events table would grow
+/// unbounded on heavy users where scraper traffic dominates HTTP traffic.
 pub fn submit_envelope(env: &serde_json::Value) -> rusqlite::Result<()> {
     let conn = crate::events::store::conn().lock().unwrap();
     let outcome = crate::events::store::write::insert(&conn, env)?;
     drop(conn);
+
+    crate::events::store::record_insert_and_maybe_prune(
+        crate::events::store::DEFAULT_MAX_BYTES,
+    );
 
     let event_type = env.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let now_ms = std::time::SystemTime::now()

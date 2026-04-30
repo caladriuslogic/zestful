@@ -33,11 +33,17 @@ pub fn host() -> String {
 }
 
 /// Return the OS user name. Resolution order: `$USER`, `$USERNAME`, then
-/// literal `"unknown"`. Mirrors the private helper in `events::map`.
+/// literal `"unknown"`. Empty values are treated as missing — symmetric
+/// with `host()`'s behavior.
 pub fn os_user() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "unknown".into())
+    for var in ["USER", "USERNAME"] {
+        if let Ok(name) = std::env::var(var) {
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    "unknown".into()
 }
 
 /// Return the stable device ID, creating it on first call if needed.
