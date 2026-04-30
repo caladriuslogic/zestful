@@ -7,6 +7,7 @@
 mod state;
 mod discovery;
 mod emit;
+mod watcher;
 pub mod parsers;
 pub mod pricing;
 

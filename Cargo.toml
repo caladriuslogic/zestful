@@ -22,6 +22,7 @@ futures = "0.3"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 reqwest-eventsource = "0.6"
+notify = "6"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [
