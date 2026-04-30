@@ -33,7 +33,10 @@ const CONTEXT_WINDOWS: &[(&str, u64)] = &[
     ("claude-opus-4-7",            1_000_000),
     ("claude-sonnet-4-6",          1_000_000),
     ("claude-haiku-4-5-20251001",  200_000),
-    // Codex models — populate from Task 7 fixtures.
+    // Codex models — observed in captured fixtures. The fixture's
+    // `model_context_window` field reported 258_400 for gpt-5.4.
+    ("gpt-5.4",       258_400),
+    ("gpt-5-codex",   258_400),
 ];
 
 /// Per-million-token prices (USD).
@@ -63,10 +66,21 @@ const PRICES: &[(&str, PriceBreakdown)] = &[
         cache_write_per_mtoken: 1.25,
         reasoning_per_mtoken:   0.0,
     }),
-    // Codex / OpenAI models populated from Task 7's fixture survey.
-    // Until that lands, this list omits them — unknown-model code path
-    // exercises gracefully (cost_estimate_usd = null).
+    // Codex / OpenAI models — placeholder GPT-5-family pricing pending
+    // verification against current OpenAI pricing page. Codex tracks only
+    // cached_input_tokens (no separate cache_creation), so cache_write is 0
+    // and reasoning_per_mtoken applies to reasoning_output_tokens.
+    ("gpt-5.4", GPT_5_PRICES),
+    ("gpt-5-codex", GPT_5_PRICES),
 ];
+
+const GPT_5_PRICES: PriceBreakdown = PriceBreakdown {
+    input_per_mtoken:       2.50,
+    output_per_mtoken:      10.00,
+    cache_read_per_mtoken:  0.25,
+    cache_write_per_mtoken: 0.0,
+    reasoning_per_mtoken:   10.00,
+};
 
 const SONNET_3X_PRICES: PriceBreakdown = PriceBreakdown {
     input_per_mtoken:       3.00,

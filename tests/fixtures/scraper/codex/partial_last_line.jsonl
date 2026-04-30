@@ -1,0 +1,6 @@
+{"timestamp":"2026-04-20T21:51:43.323Z","type":"session_meta","payload":{"id":"019dace0-ba1c-7d83-8cc1-395c89d2199c","timestamp":"2026-04-20T21:51:42.112Z","cwd":"[redacted]","originator":"Codex Desktop","cli_version":"0.122.0-alpha.13","source":"vscode","model_provider":"openai"}}
+{"timestamp":"2026-04-20T21:51:43.325Z","type":"turn_context","payload":{"turn_id":"019dace0-ba2c-7cc2-96cd-e136881af813","cwd":"[redacted]","model":"gpt-5.4","approval_policy":"on-request","sandbox_policy":"[redacted]"}}
+{"timestamp":"2026-04-20T21:51:43.538Z","type":"response_item","payload":{"type":"message","role":"user","content":"[redacted]"}}
+{"timestamp":"2026-04-20T21:51:45.958Z","type":"response_item","payload":{"type":"reasoning","role":null,"content":"[redacted]"}}
+{"timestamp":"2026-04-20T21:51:51.242Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":16124,"cached_input_tokens":11648,"output_tokens":380,"reasoning_output_tokens":87,"total_tokens":16504},"last_token_usage":{"input_tokens":16124,"cached_input_tokens":11648,"output_tokens":380,"reasoning_output_tokens":87,"total_tokens":16504},"model_context_window":258400}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":42
