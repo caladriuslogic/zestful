@@ -5,6 +5,7 @@
 use rusqlite::Connection;
 
 const MIGRATION_001: &str = include_str!("migrations/001_initial.sql");
+const MIGRATION_002: &str = include_str!("migrations/002_scraper_file_state.sql");
 
 pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     // Ensure the tracking table exists first. The migration file itself
@@ -22,6 +23,10 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     if !is_applied(conn, 1)? {
         conn.execute_batch(MIGRATION_001)?;
         record_applied(conn, 1)?;
+    }
+    if !is_applied(conn, 2)? {
+        conn.execute_batch(MIGRATION_002)?;
+        record_applied(conn, 2)?;
     }
     Ok(())
 }
@@ -70,7 +75,7 @@ mod tests {
     fn migrations_run_clean_on_empty_db() {
         let conn = open_memory();
         run_migrations(&conn).expect("migrations should run clean");
-        assert_eq!(current_version(&conn).unwrap(), 1);
+        assert_eq!(current_version(&conn).unwrap(), 2);
 
         // Verify the events table exists and has the expected columns.
         let mut stmt = conn.prepare("PRAGMA table_info(events)").unwrap();
@@ -108,12 +113,12 @@ mod tests {
         run_migrations(&conn).unwrap();
         let v2 = current_version(&conn).unwrap();
         assert_eq!(v1, v2);
-        assert_eq!(v1, 1);
+        assert_eq!(v1, 2);
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM _schema_migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
     }
 
     #[test]
@@ -125,18 +130,49 @@ mod tests {
         {
             let conn = Connection::open(f.path()).unwrap();
             run_migrations(&conn).unwrap();
-            assert_eq!(current_version(&conn).unwrap(), 1);
+            assert_eq!(current_version(&conn).unwrap(), 2);
         }
 
         // Reopen; should be a no-op.
         {
             let conn = Connection::open(f.path()).unwrap();
             run_migrations(&conn).unwrap();
-            assert_eq!(current_version(&conn).unwrap(), 1);
+            assert_eq!(current_version(&conn).unwrap(), 2);
             let count: i64 = conn
                 .query_row("SELECT COUNT(*) FROM _schema_migrations", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(count, 1);
+            assert_eq!(count, 2);
         }
+    }
+
+    #[test]
+    fn migration_002_creates_scraper_file_state() {
+        let conn = open_memory();
+        run_migrations(&conn).expect("migrations should run clean");
+        assert_eq!(current_version(&conn).unwrap(), 2);
+
+        // Verify the scraper_file_state table exists with expected columns.
+        let mut stmt = conn.prepare("PRAGMA table_info(scraper_file_state)").unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        for expected in [
+            "path", "agent", "fingerprint", "last_offset", "last_emit_ts",
+        ] {
+            assert!(cols.iter().any(|c| c == expected),
+                    "scraper_file_state missing column {}", expected);
+        }
+
+        // Verify the agent index exists.
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_scraper_file_state_agent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 1);
     }
 }
