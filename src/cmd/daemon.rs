@@ -87,6 +87,15 @@ async fn run_server() -> Result<()> {
         std::process::exit(1);
     }
 
+    // Start the agent-scraper subsystem. Off via `scraper.enabled = false`
+    // for the rare case someone needs to disable it without redeploying.
+    let _scraper_handle = if crate::scraper::is_enabled() {
+        Some(crate::scraper::spawn())
+    } else {
+        crate::log::log("scraper", "disabled via scraper.enabled = false");
+        None
+    };
+
     let app = build_router();
 
     let port = config::daemon_port();
