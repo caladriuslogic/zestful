@@ -62,6 +62,7 @@ pub struct AppState {
     pub help_open: bool,
     pub toast: Option<(String, Instant)>,
     pub should_quit: bool,
+    pub fullscreen: bool,
 }
 
 impl AppState {
@@ -80,6 +81,7 @@ impl AppState {
             help_open: false,
             toast: None,
             should_quit: false,
+            fullscreen: false,
         }
     }
 

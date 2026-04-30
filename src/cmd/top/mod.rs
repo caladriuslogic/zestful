@@ -18,12 +18,12 @@ use app::{AppState, Connection, SideEffect};
 use client::{Client, StreamEvent};
 use keys::key_to_action;
 
-pub fn run() -> Result<()> {
+pub fn run(fullscreen: bool) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    rt.block_on(run_async())
+    rt.block_on(run_async(fullscreen))
 }
 
-async fn run_async() -> Result<()> {
+async fn run_async(fullscreen: bool) -> Result<()> {
     install_panic_hook();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -31,7 +31,7 @@ async fn run_async() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut term = Terminal::new(backend)?;
 
-    let result = main_loop(&mut term).await;
+    let result = main_loop(&mut term, fullscreen).await;
 
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
@@ -39,8 +39,9 @@ async fn run_async() -> Result<()> {
     result
 }
 
-async fn main_loop(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+async fn main_loop(term: &mut Terminal<CrosstermBackend<io::Stdout>>, fullscreen: bool) -> Result<()> {
     let mut state = AppState::new();
+    state.fullscreen = fullscreen;
 
     // Build client; if config is missing we still run (offline mode).
     let client_res = Client::from_config();

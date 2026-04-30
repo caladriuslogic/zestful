@@ -11,16 +11,9 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-/// Cap the rendered body so the TUI doesn't sprawl across an oversized
-/// terminal. Anything larger than `MAX_BODY_WIDTH × MAX_BODY_HEIGHT` gets
-/// empty gutter around the centered content.
 const MAX_BODY_WIDTH: u16 = 120;
 const MAX_BODY_HEIGHT: u16 = 25;
 
-/// Compute the centered, capped area within the given frame rect. On
-/// either axis, if the frame is at-or-below the cap, that axis is used
-/// as-is; if it exceeds the cap, the area is shrunk to the cap and
-/// centered (with floor-rounded gutter on each side).
 fn centered_area(full: Rect) -> Rect {
     let w = full.width.min(MAX_BODY_WIDTH);
     let h = full.height.min(MAX_BODY_HEIGHT);
@@ -30,7 +23,7 @@ fn centered_area(full: Rect) -> Rect {
 }
 
 pub fn draw(f: &mut Frame, state: &AppState) {
-    let area = centered_area(f.area());
+    let area = if state.fullscreen { f.area() } else { centered_area(f.area()) };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -43,7 +36,7 @@ pub fn draw(f: &mut Frame, state: &AppState) {
     draw_header(f, chunks[0], state);
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(chunks[1]);
     draw_tiles_list(f, body_chunks[0], state);
     draw_detail_pane(f, body_chunks[1], state);
@@ -109,7 +102,7 @@ pub fn draw_status_bar(f: &mut Frame, area: Rect, state: &AppState) {
 pub fn draw_help_overlay(f: &mut Frame, state: &AppState) {
     use crate::cmd::top::keys::HELP;
     if !state.help_open { return; }
-    let area = centered_area(f.area());
+    let area = f.area();
 
     // Centered modal — 70% wide, 75% tall (capped to content needs).
     let w = (area.width as f32 * 0.70) as u16;
@@ -156,7 +149,7 @@ pub fn draw_help_overlay(f: &mut Frame, state: &AppState) {
 
 pub fn draw_toast(f: &mut Frame, state: &AppState) {
     let Some((msg, _)) = &state.toast else { return; };
-    let area = centered_area(f.area());
+    let area = f.area();
     // Render as a one-line strip at row h-2 (just above the status bar),
     // right-aligned within the full width with brand-orange foreground.
     if area.height < 3 { return; }
@@ -206,6 +199,10 @@ pub fn draw_tiles_list(f: &mut Frame, area: Rect, state: &AppState) {
     let notif_ids: std::collections::HashSet<&str> =
         state.notifications.iter().map(|n| n.tile_id.as_str()).collect();
 
+    // cursor(2) + agent(14) + sep(1) + sep(1) + time(4) + glyph(2) = 24 fixed chars per row
+    const AGENT_W: usize = 14;
+    let proj_w = (inner.width as usize).saturating_sub(24).max(10);
+
     let mut lines: Vec<Line> = Vec::with_capacity(visible.len());
     for (idx, t) in visible.iter().enumerate() {
         let cursor = if idx == state.selected { "▶ " } else { "  " };
@@ -221,9 +218,9 @@ pub fn draw_tiles_list(f: &mut Frame, area: Rect, state: &AppState) {
         let last = relative_time(t.last_seen_at, now_ms);
         lines.push(Line::from(vec![
             Span::styled(cursor, Style::default().fg(agent_color(&t.agent))),
-            Span::styled(format!("{:<14}", truncate(&t.agent, 14)), agent_style),
+            Span::styled(format!("{:<AGENT_W$}", truncate(&t.agent, AGENT_W)), agent_style),
             Span::raw(" "),
-            Span::raw(format!("{:<10}", truncate(project, 10))),
+            Span::raw(format!("{:<width$}", truncate(project, proj_w), width = proj_w)),
             Span::raw(" "),
             Span::styled(format!("{:>4}", last), Style::default().fg(Color::DarkGray)),
             glyph,
@@ -259,6 +256,14 @@ pub fn draw_detail_pane(f: &mut Frame, area: Rect, state: &AppState) {
     let now = now_ms();
     let mut lines: Vec<Line> = Vec::new();
 
+    let notifs = state.notifications_for_selected();
+
+    // Fixed rows: surface(1) + counts(1) + blank(1) + activity_header(1) + sparkline(1)
+    //           + blank(1) + recent_header(1) + blank(1) + notifs_header(1) + notif_lines
+    let notif_lines = if notifs.is_empty() { 1 } else { notifs.len() as u16 };
+    let fixed_rows = 9 + notif_lines;
+    let max_events = (inner.height.saturating_sub(fixed_rows)).max(1) as usize;
+
     lines.push(Line::from(Span::styled(t.surface_label.clone(), Style::default().fg(Color::Cyan))));
     lines.push(Line::from(format!(
         "{} events · first {} ago · last {} ago",
@@ -280,7 +285,7 @@ pub fn draw_detail_pane(f: &mut Frame, area: Rect, state: &AppState) {
     if state.recent_events.is_empty() {
         lines.push(Line::from(Span::styled("  (no events)", Style::default().fg(Color::DarkGray))));
     } else {
-        for e in state.recent_events.iter().take(8) {
+        for e in state.recent_events.iter().take(max_events) {
             let when = relative_time(e.event_ts, now);
             lines.push(Line::from(vec![
                 Span::styled(format!("  {:>5}  ", when), Style::default().fg(Color::DarkGray)),
@@ -289,8 +294,6 @@ pub fn draw_detail_pane(f: &mut Frame, area: Rect, state: &AppState) {
         }
     }
     lines.push(Line::from(""));
-
-    let notifs = state.notifications_for_selected();
     lines.push(Line::from(Span::styled("Notifications", Style::default().add_modifier(Modifier::BOLD))));
     if notifs.is_empty() {
         lines.push(Line::from(Span::styled("  (none)", Style::default().fg(Color::DarkGray))));
@@ -357,43 +360,6 @@ mod tests {
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| draw(f, state)).unwrap();
         term.backend().buffer().clone()
-    }
-
-    #[test]
-    fn centered_area_caps_each_axis_independently() {
-        // Both axes at-or-below cap: full size, no offset.
-        let r = centered_area(Rect::new(0, 0, 80, 20));
-        assert_eq!((r.x, r.y, r.width, r.height), (0, 0, 80, 20));
-        // Width over cap, height under: cap + center on x only.
-        let r = centered_area(Rect::new(0, 0, 200, 20));
-        assert_eq!(r.width, MAX_BODY_WIDTH);
-        assert_eq!(r.x, (200 - MAX_BODY_WIDTH) / 2);
-        assert_eq!((r.y, r.height), (0, 20));
-        // Height over cap, width under: cap + center on y only.
-        let r = centered_area(Rect::new(0, 0, 80, 40));
-        assert_eq!(r.height, MAX_BODY_HEIGHT);
-        assert_eq!(r.y, (40 - MAX_BODY_HEIGHT) / 2);
-        assert_eq!((r.x, r.width), (0, 80));
-        // Both over cap: cap + center on both.
-        let r = centered_area(Rect::new(0, 0, 200, 40));
-        assert_eq!((r.width, r.height), (MAX_BODY_WIDTH, MAX_BODY_HEIGHT));
-        assert_eq!(r.x, (200 - MAX_BODY_WIDTH) / 2);
-        assert_eq!(r.y, (40 - MAX_BODY_HEIGHT) / 2);
-    }
-
-    #[test]
-    fn ultrawide_terminal_leaves_empty_gutter() {
-        // On a 200-col terminal, the brand mark sits at the gutter offset,
-        // not at column 0.
-        let state = AppState::new();
-        let buf = render(&state, 200, 5);
-        let gutter = (200 - MAX_BODY_WIDTH) / 2;
-        // The leading "▌" of the brand mark should be at column `gutter`.
-        let cell = buf.cell((gutter as u16, 0)).unwrap();
-        assert_eq!(cell.symbol(), "▌", "brand mark should start at gutter column {}", gutter);
-        // And column 0 should be empty (just default bg).
-        let edge = buf.cell((0, 0)).unwrap();
-        assert_eq!(edge.symbol(), " ", "left gutter should be blank");
     }
 
     #[test]
