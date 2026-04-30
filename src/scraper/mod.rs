@@ -84,7 +84,9 @@ async fn handle_change(
     };
     let path_str = path.to_string_lossy().to_string();
 
-    // 1. Read state.
+    // 1. Read state. A panic in spawn_blocking (e.g. mutex poisoned by an
+    //    earlier panic in the prune task) must NOT abort the dispatch
+    //    loop — log and bail; next tick retries.
     let state = match tokio::task::spawn_blocking({
         let p = path_str.clone();
         let a = agent.to_string();
@@ -92,10 +94,14 @@ async fn handle_change(
             let c = crate::events::store::conn().lock().unwrap();
             state::get_or_fresh(&c, &p, &a)
         }
-    }).await.expect("state task panicked") {
-        Ok(s) => s,
-        Err(e) => {
+    }).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             crate::log::log("scraper", &format!("state read failed: {}", e));
+            return;
+        }
+        Err(e) => {
+            crate::log::log("scraper", &format!("state task panicked: {}", e));
             return;
         }
     };
@@ -107,13 +113,16 @@ async fn handle_change(
     // 3. Parse.
     let path_owned = path.to_path_buf();
     let parser_clone = parser.clone();
-    let parse_result = tokio::task::spawn_blocking(move || {
+    let result = match tokio::task::spawn_blocking(move || {
         parser_clone.parse_from(&path_owned, from_offset)
-    }).await.expect("parser task panicked");
-    let result = match parse_result {
-        Ok(r) => r,
-        Err(e) => {
+    }).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             crate::log::log("scraper", &format!("parse failed for {}: {}", path_str, e));
+            return;
+        }
+        Err(e) => {
+            crate::log::log("scraper", &format!("parser task panicked for {}: {}", path_str, e));
             return;
         }
     };
@@ -123,13 +132,19 @@ async fn handle_change(
     for rec in &result.records {
         let env = emit::build_envelope(rec, agent);
         let env_clone = env.clone();
-        let submit_result = tokio::task::spawn_blocking(move || {
+        match tokio::task::spawn_blocking(move || {
             emit::submit_envelope(&env_clone)
-        }).await.expect("submit task panicked");
-        if let Err(e) = submit_result {
-            crate::log::log("scraper", &format!("emit failed: {}", e));
-            // Bail out of this file; next tick retries from the unchanged offset.
-            return;
+        }).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                crate::log::log("scraper", &format!("emit failed: {}", e));
+                // Bail out of this file; next tick retries from the unchanged offset.
+                return;
+            }
+            Err(e) => {
+                crate::log::log("scraper", &format!("submit task panicked: {}", e));
+                return;
+            }
         }
     }
 
@@ -152,14 +167,11 @@ async fn handle_rescan(
     agent_for: &HashMap<PathBuf, &'static str>,
     parsers: &HashMap<&'static str, Arc<dyn Parser>>,
 ) {
-    // Discover all transcript files under all roots.
+    // Discover all transcript files under all roots; classify happens
+    // inside handle_change, so we don't need to look up the agent here.
     for root in roots {
-        let agent = match agent_for.get(root) { Some(a) => *a, None => continue };
         for path in walk_jsonl(root) {
-            // Synthesize a FileChanged-equivalent: same handler.
             handle_change(&path, roots, agent_for, parsers).await;
-            // Suppress the unused-var warning via a no-op use of `agent`.
-            let _ = agent;
         }
     }
 }
