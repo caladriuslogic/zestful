@@ -5,7 +5,6 @@
 //! now" or None. The engine in mod.rs iterates (tile, rule) pairs and
 //! assembles full Notification rows from each Some.
 
-pub use crate::events::severity::Severity;
 use crate::events::store::query::EventRow;
 use crate::events::tiles::tile::Tile;
 use serde::{Deserialize, Serialize};

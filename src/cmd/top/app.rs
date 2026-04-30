@@ -62,6 +62,7 @@ pub struct AppState {
     pub help_open: bool,
     pub toast: Option<(String, Instant)>,
     pub should_quit: bool,
+    pub fullscreen: bool,
 }
 
 impl AppState {
@@ -80,6 +81,7 @@ impl AppState {
             help_open: false,
             toast: None,
             should_quit: false,
+            fullscreen: false,
         }
     }
 
@@ -392,6 +394,7 @@ mod tests {
             trigger_event_id: "ev_1".to_string(),
             triggered_at_ms: 100,
             focus_uri: None,
+            push: false,
         }];
         s.apply(Action::ToggleNotifOnly);
         let v = s.visible_tiles();
