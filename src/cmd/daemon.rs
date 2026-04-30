@@ -408,6 +408,8 @@ struct EventsQuery {
     #[serde(default)]
     agent: Option<String>,
     #[serde(default)]
+    surface_token: Option<String>,
+    #[serde(default)]
     cursor: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
@@ -440,6 +442,7 @@ async fn handle_list_events(
         event_type: q.event_type,
         session_id: q.session_id,
         agent: q.agent,
+        surface_token: q.surface_token,
     };
     let cursor = q.cursor.as_deref()
         .and_then(crate::events::store::query::Cursor::parse);

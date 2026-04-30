@@ -161,7 +161,8 @@ async fn refetch_after_signal(c: &Client, state: &mut AppState) {
     if let Ok(n) = n { state.notifications = n; }
     if let Some(sel) = state.selected_tile() {
         let agent = sel.agent.clone();
-        if let Ok(evs) = c.events_for_agent(&agent, since_1h(), 60).await {
+        let surface = tile_surface_token(sel);
+        if let Ok(evs) = c.events_for_agent(&agent, surface.as_deref(), since_24h(), 60).await {
             state.recent_events = evs;
         }
     }
@@ -179,7 +180,8 @@ async fn run_side_effects(c: &Client, state: &mut AppState, fx: Vec<SideEffect>)
             SideEffect::RefetchEventsForSelected => {
                 if let Some(sel) = state.selected_tile() {
                     let agent = sel.agent.clone();
-                    if let Ok(evs) = c.events_for_agent(&agent, since_1h(), 60).await {
+                    let surface = tile_surface_token(sel);
+                    if let Ok(evs) = c.events_for_agent(&agent, surface.as_deref(), since_24h(), 60).await {
                         state.recent_events = evs;
                     }
                 }
@@ -191,6 +193,13 @@ async fn run_side_effects(c: &Client, state: &mut AppState, fx: Vec<SideEffect>)
             }
         }
     }
+}
+
+/// Return the surface_token to pass to /events for a tile, or None for
+/// browser tiles (which collapse all conversations into one tile and
+/// have no per-event surface field to filter on).
+fn tile_surface_token(tile: &crate::events::tiles::tile::Tile) -> Option<String> {
+    if tile.surface_kind == "browser" { None } else { Some(tile.surface_token.clone()) }
 }
 
 fn since_24h() -> i64 { now_ms() - 24 * 3_600_000 }

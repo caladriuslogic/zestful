@@ -100,7 +100,7 @@ fn run_list(
     json: bool,
 ) -> anyhow::Result<()> {
     let filters = crate::events::store::query::ListFilters {
-        since, until, source, event_type, session_id, agent,
+        since, until, source, event_type, session_id, agent, surface_token: None,
     };
     let c = crate::events::store::conn().lock().unwrap();
     let (rows, _next) = crate::events::store::query::list(&c, &filters, limit, None)?;
@@ -206,7 +206,7 @@ fn run_count(
     agent: Option<String>,
 ) -> anyhow::Result<()> {
     let filters = crate::events::store::query::ListFilters {
-        since, until, source, event_type, session_id, agent,
+        since, until, source, event_type, session_id, agent, surface_token: None,
     };
     let c = crate::events::store::conn().lock().unwrap();
     let n = crate::events::store::query::count(&c, &filters)?;

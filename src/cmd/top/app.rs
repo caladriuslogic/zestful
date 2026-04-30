@@ -118,18 +118,21 @@ impl AppState {
                 let len = self.visible_tiles().len();
                 if len > 0 && self.selected + 1 < len {
                     self.selected += 1;
+                    self.recent_events.clear();
                     fx.push(SideEffect::RefetchEventsForSelected);
                 }
             }
             Action::SelectPrev => {
                 if self.selected > 0 {
                     self.selected -= 1;
+                    self.recent_events.clear();
                     fx.push(SideEffect::RefetchEventsForSelected);
                 }
             }
             Action::SelectFirst => {
                 if self.selected != 0 {
                     self.selected = 0;
+                    self.recent_events.clear();
                     fx.push(SideEffect::RefetchEventsForSelected);
                 }
             }
@@ -139,6 +142,7 @@ impl AppState {
                     let last = len - 1;
                     if self.selected != last {
                         self.selected = last;
+                        self.recent_events.clear();
                         fx.push(SideEffect::RefetchEventsForSelected);
                     }
                 }
@@ -149,6 +153,7 @@ impl AppState {
                     let new = (self.selected + 10).min(len - 1);
                     if new != self.selected {
                         self.selected = new;
+                        self.recent_events.clear();
                         fx.push(SideEffect::RefetchEventsForSelected);
                     }
                 }
@@ -157,6 +162,7 @@ impl AppState {
                 let new = self.selected.saturating_sub(10);
                 if new != self.selected {
                     self.selected = new;
+                    self.recent_events.clear();
                     fx.push(SideEffect::RefetchEventsForSelected);
                 }
             }
