@@ -5,6 +5,7 @@
 //! now" or None. The engine in mod.rs iterates (tile, rule) pairs and
 //! assembles full Notification rows from each Some.
 
+pub use crate::events::severity::Severity;
 use crate::events::store::query::EventRow;
 use crate::events::tiles::tile::Tile;
 use serde::{Deserialize, Serialize};
@@ -30,21 +31,19 @@ impl std::fmt::Display for Severity {
 
 /// Per-firing fields a Rule produces. The engine fills in the
 /// identity-derived fields (id, rule_id, tile_id) and the tile-copied
-/// fields (agent, project_label, focus_uri, severity).
+/// fields (agent, project_label, focus_uri).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NotificationBody {
     pub message: String,
     pub trigger_event_id: String,
     pub triggered_at_ms: i64,
+    pub severity: Severity,
+    pub push: bool,
 }
 
 pub trait Rule: Send + Sync {
     /// Stable identifier for this rule, e.g. "agent_completed".
     fn id(&self) -> &'static str;
-
-    /// Per-rule constant severity on day one. Future-compat: a rule
-    /// could override per-firing by moving severity into NotificationBody.
-    fn severity(&self) -> Severity;
 
     /// Evaluate this rule for a tile. `tile_events` is the per-tile
     /// event stream, ascending by received_at, filtered to events whose
@@ -56,22 +55,4 @@ pub trait Rule: Send + Sync {
         tile_events: &[&EventRow],
         now_ms: i64,
     ) -> Option<NotificationBody>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn severity_display_is_lowercase() {
-        assert_eq!(Severity::Info.to_string(), "info");
-        assert_eq!(Severity::Warn.to_string(), "warn");
-        assert_eq!(Severity::Urgent.to_string(), "urgent");
-    }
-
-    #[test]
-    fn severity_serializes_lowercase() {
-        let s = serde_json::to_string(&Severity::Warn).unwrap();
-        assert_eq!(s, "\"warn\"");
-    }
 }

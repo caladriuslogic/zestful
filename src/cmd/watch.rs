@@ -64,9 +64,22 @@ pub fn run(agent: String, command: Vec<String>) -> Result<()> {
         &agent_name,
         &message,
         severity,
-        terminal_uri,
+        terminal_uri.clone(),
         false,
     );
+
+    // Emit a structured watch.completed event to the daemon. Best-effort;
+    // event-emission failures are logged and swallowed.
+    let envelopes = crate::events::map_watch_completed(
+        &agent_name,
+        &cmd_name,
+        exit_code,
+        None,  // duration_ms — not tracked today; future addition
+        terminal_uri,
+    );
+    if let Err(e) = crate::events::send_to_daemon(&envelopes) {
+        crate::log::log("watch", &format!("event emission failed: {}", e));
+    }
 
     std::process::exit(exit_code);
 }

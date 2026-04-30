@@ -6,6 +6,7 @@
 //! path does NOT deserialize into this enum — unknown types must be accepted
 //! for forward-compat, so the daemon works at the `serde_json::Value` layer.
 
+use crate::events::severity::Severity;
 use serde::{Deserialize, Serialize};
 
 /// Tagged union of all v1 event payloads. The serialization format uses the
@@ -39,6 +40,9 @@ pub enum Payload {
     #[serde(rename = "agent.notified")]
     AgentNotified(AgentNotified),
 
+    #[serde(rename = "watch.completed")]
+    WatchCompleted(WatchCompleted),
+
     #[serde(rename = "session.started")]
     SessionStarted(SessionStarted),
 }
@@ -54,6 +58,7 @@ impl Payload {
             Payload::ToolCompleted(_) => "tool.completed",
             Payload::PermissionRequested(_) => "permission.requested",
             Payload::AgentNotified(_) => "agent.notified",
+            Payload::WatchCompleted(_) => "watch.completed",
             Payload::SessionStarted(_) => "session.started",
         }
     }
@@ -70,6 +75,7 @@ impl Payload {
             Payload::ToolCompleted(p) => serde_json::to_value(p).unwrap_or_default(),
             Payload::PermissionRequested(p) => serde_json::to_value(p).unwrap_or_default(),
             Payload::AgentNotified(p) => serde_json::to_value(p).unwrap_or_default(),
+            Payload::WatchCompleted(p) => serde_json::to_value(p).unwrap_or_default(),
             Payload::SessionStarted(p) => serde_json::to_value(p).unwrap_or_default(),
         }
     }
@@ -141,6 +147,24 @@ pub struct AgentNotified {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub message: Option<String>,
+    /// Optional emitter-asserted severity. Rules read this as input but
+    /// remain authoritative — they may override.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub severity_hint: Option<Severity>,
+    /// Optional emitter-asserted push policy. Rules read this as input;
+    /// `Some(false)` means "do not push regardless of severity."
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub push_hint: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct WatchCompleted {
+    pub command: String,
+    pub exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -188,6 +212,10 @@ mod tests {
                 Payload::SessionStarted(SessionStarted::default()),
                 "session.started",
             ),
+            (
+                Payload::WatchCompleted(WatchCompleted::default()),
+                "watch.completed",
+            ),
         ];
         for (p, tag) in cases {
             assert_eq!(p.type_str(), tag);
@@ -232,10 +260,58 @@ mod tests {
     }
 
     #[test]
+    fn watch_completed_round_trip() {
+        let p = Payload::WatchCompleted(WatchCompleted {
+            command: "npm".into(),
+            exit_code: 1,
+            duration_ms: Some(5000),
+            message: Some("npm test failed".into()),
+        });
+        assert_eq!(p.type_str(), "watch.completed");
+        let body = p.to_body_value();
+        assert!(body.get("type").is_none(), "body must not include tag");
+        assert_eq!(body["command"], "npm");
+        assert_eq!(body["exit_code"], 1);
+        assert_eq!(body["duration_ms"], 5000);
+        assert_eq!(body["message"], "npm test failed");
+    }
+
+    #[test]
+    fn watch_completed_minimal_omits_optional_fields() {
+        let p = Payload::WatchCompleted(WatchCompleted {
+            command: "true".into(),
+            exit_code: 0,
+            duration_ms: None,
+            message: None,
+        });
+        let body = p.to_body_value();
+        assert_eq!(body["command"], "true");
+        assert_eq!(body["exit_code"], 0);
+        assert!(body.get("duration_ms").is_none());
+        assert!(body.get("message").is_none());
+    }
+
+    #[test]
+    fn watch_completed_serializes_with_type_tag() {
+        let p = Payload::WatchCompleted(WatchCompleted {
+            command: "ls".into(),
+            exit_code: 0,
+            duration_ms: None,
+            message: None,
+        });
+        let v: serde_json::Value = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["type"], "watch.completed");
+        assert_eq!(v["command"], "ls");
+        assert_eq!(v["exit_code"], 0);
+    }
+
+    #[test]
     fn agent_notified_optional_message() {
         let with_msg = Payload::AgentNotified(AgentNotified {
             kind: "notification".into(),
             message: Some("Waiting for your input".into()),
+            severity_hint: None,
+            push_hint: None,
         });
         let body = with_msg.to_body_value();
         assert_eq!(body["kind"], "notification");
@@ -244,8 +320,52 @@ mod tests {
         let without_msg = Payload::AgentNotified(AgentNotified {
             kind: "other".into(),
             message: None,
+            severity_hint: None,
+            push_hint: None,
         });
         let body = without_msg.to_body_value();
         assert!(body.get("message").is_none());
+    }
+
+    #[test]
+    fn agent_notified_with_hints_round_trips() {
+        let p = Payload::AgentNotified(AgentNotified {
+            kind: "notification".into(),
+            message: Some("Pay attention".into()),
+            severity_hint: Some(Severity::Urgent),
+            push_hint: Some(false),
+        });
+        let body = p.to_body_value();
+        assert_eq!(body["kind"], "notification");
+        assert_eq!(body["message"], "Pay attention");
+        assert_eq!(body["severity_hint"], "urgent");
+        assert_eq!(body["push_hint"], false);
+    }
+
+    #[test]
+    fn agent_notified_omits_hints_when_none() {
+        let p = Payload::AgentNotified(AgentNotified {
+            kind: "other".into(),
+            message: None,
+            severity_hint: None,
+            push_hint: None,
+        });
+        let body = p.to_body_value();
+        assert_eq!(body["kind"], "other");
+        assert!(body.get("message").is_none());
+        assert!(body.get("severity_hint").is_none());
+        assert!(body.get("push_hint").is_none());
+    }
+
+    #[test]
+    fn agent_notified_severity_hint_serializes_lowercase() {
+        let p = Payload::AgentNotified(AgentNotified {
+            kind: "notification".into(),
+            message: None,
+            severity_hint: Some(Severity::Warn),
+            push_hint: None,
+        });
+        let body = p.to_body_value();
+        assert_eq!(body["severity_hint"], "warn");
     }
 }

@@ -11,9 +11,6 @@ impl Rule for AgentCompleted {
     fn id(&self) -> &'static str {
         "agent_completed"
     }
-    fn severity(&self) -> Severity {
-        Severity::Info
-    }
     fn evaluate(
         &self,
         tile: &Tile,
@@ -32,6 +29,8 @@ impl Rule for AgentCompleted {
             message,
             trigger_event_id: latest.event_id.clone(),
             triggered_at_ms: latest.event_ts,
+            severity: Severity::Warn,
+            push: true,
         })
     }
 }
@@ -92,6 +91,8 @@ mod tests {
         assert_eq!(body.message, "claude-code completed on zestful");
         assert_eq!(body.trigger_event_id, "evt-2");
         assert_eq!(body.triggered_at_ms, 2000);
+        assert_eq!(body.severity, Severity::Warn);
+        assert_eq!(body.push, true);
     }
 
     #[test]
@@ -122,5 +123,7 @@ mod tests {
             .evaluate(&tile, &refs, 2000)
             .expect("expected Some(body)");
         assert_eq!(body.message, "claude-code completed");
+        assert_eq!(body.severity, Severity::Warn);
+        assert_eq!(body.push, true);
     }
 }

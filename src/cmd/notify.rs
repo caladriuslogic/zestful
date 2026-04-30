@@ -5,6 +5,7 @@
 //! inspector for click-to-focus.
 
 use crate::config;
+use crate::events::severity::Severity;
 use anyhow::Result;
 use serde::Serialize;
 
@@ -59,15 +60,45 @@ pub fn run(
         eprintln!("zestful: uri={}", terminal_uri.as_deref().unwrap_or("none"));
     }
 
-    send(
+    // `send` already swallows its own network errors and always returns Ok;
+    // the discard makes the fire-and-forget intent explicit and matches the
+    // pattern already used in cmd/watch.rs.
+    let _ = send(
         &token,
         port,
         &agent,
         &message,
         &severity,
-        terminal_uri,
+        terminal_uri.clone(),
         no_push,
-    )
+    );
+
+    // Also emit a structured event to the daemon (PR1 of legacy-/notify retirement).
+    // Best-effort: errors are logged and swallowed — failure to reach the daemon must
+    // never break the user-facing notify path. Mirror cmd/hook.rs.
+
+    // Map --severity (info|warning|urgent) → Severity enum, passing as a hint.
+    // The clap default is "warning" so we always send Some.
+    let severity_hint = match severity.as_str() {
+        "info" => Some(Severity::Info),
+        "warning" => Some(Severity::Warn),
+        "urgent" => Some(Severity::Urgent),
+        _ => None,  // unrecognized — defer to rule's fallback
+    };
+    let push_hint = if no_push { Some(false) } else { None };
+
+    let envelopes = crate::events::map_cli_notify(
+        &agent,
+        &message,
+        terminal_uri,
+        severity_hint,
+        push_hint,
+    );
+    if let Err(e) = crate::events::send_to_daemon(&envelopes) {
+        crate::log::log("notify", &format!("event emission failed: {}", e));
+    }
+
+    Ok(())
 }
 
 /// Send a notification to the Zestful app. Used by both `notify` and `watch` commands.

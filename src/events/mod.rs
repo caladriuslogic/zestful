@@ -13,9 +13,10 @@ pub mod map;
 pub mod payload;
 pub mod preview;
 pub mod send;
+pub mod severity;
 pub mod notifications;
 pub mod store;
 pub mod tiles;
 
-pub use map::map_hook_payload;
+pub use map::{map_cli_notify, map_hook_payload, map_watch_completed};
 pub use send::send_to_daemon;

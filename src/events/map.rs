@@ -9,9 +9,10 @@ use crate::events::env_capture;
 use crate::events::envelope::{Context, Correlation, Envelope, Subapplication};
 use crate::events::payload::{
     AgentNotified, Payload, PermissionRequested, SessionStarted, ToolCompleted, ToolInvoked,
-    TurnCompleted, TurnPromptSubmitted,
+    TurnCompleted, TurnPromptSubmitted, WatchCompleted,
 };
 use crate::events::preview::{sha256_hex, truncate_utf8_safe};
+use crate::events::severity::Severity;
 use crate::hooks::AgentKind;
 use serde_json::Value;
 
@@ -134,7 +135,160 @@ fn generic(event: &str, payload: &Value) -> Vec<Payload> {
     vec![Payload::AgentNotified(AgentNotified {
         kind: "other".into(),
         message: hook_msg.or(Some(msg)),
+        severity_hint: None,
+        push_hint: None,
     })]
+}
+
+// ---------- CLI surface ----------
+
+/// Build a single `agent.notified` envelope for `zestful notify` / `zestful watch`.
+///
+/// Unlike `map_hook_payload`, the CLI surface has no hook payload — `agent` is
+/// a free-form user-supplied string and `message` is the user's notification
+/// text. Source is always `"cli"`. Severity, push policy, etc. stay on the
+/// legacy `/notify` path until PR2 (Mac-app side-effect re-home) decides where
+/// they belong in the events model.
+///
+/// Returns a `Vec` for shape-symmetry with `map_hook_payload`, so call sites
+/// can pipe straight into `events::send_to_daemon`.
+pub fn map_cli_notify(
+    agent: &str,
+    message: &str,
+    focus_uri: Option<String>,
+    severity_hint: Option<Severity>,
+    push_hint: Option<bool>,
+) -> Vec<Envelope> {
+    let host = hostname();
+    let os_user = os_user();
+    let device = device::device_id();
+    let source_pid = std::process::id();
+    let ts = now_unix_ms();
+
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from));
+    let project = cwd
+        .as_deref()
+        .and_then(|p| std::path::Path::new(p).file_name())
+        .map(|s| s.to_string_lossy().into_owned());
+    let shell = std::env::var("SHELL").ok().and_then(|s| {
+        std::path::Path::new(&s)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+    });
+
+    // application + application_instance: parsed out of the focus_uri.
+    let (application, application_instance) = application_from_focus_uri(focus_uri.as_deref());
+
+    let context = Context {
+        agent: Some(agent.to_string()),
+        application,
+        application_instance,
+        focus_uri,
+        shell,
+        subapplication: tmux_subapplication(),
+        cwd: cwd.clone(),
+        workspace_root: cwd,
+        project,
+        env_vars_observed: env_capture::capture(),
+        ..Default::default()
+    };
+
+    let payload = Payload::AgentNotified(AgentNotified {
+        kind: "notification".to_string(),
+        message: Some(truncate_utf8_safe(message, MESSAGE_MAX)),
+        severity_hint,
+        push_hint,
+    });
+
+    vec![Envelope {
+        id: ulid::Ulid::new().to_string(),
+        schema: 1,
+        ts,
+        seq: 0,
+        host,
+        os_user,
+        device_id: device,
+        source: "cli".to_string(),
+        source_pid,
+        type_: payload.type_str().to_string(),
+        correlation: None,
+        context: Some(context),
+        payload: payload.to_body_value(),
+    }]
+}
+
+/// Build a single `watch.completed` envelope for `zestful watch` exits.
+///
+/// `agent_name` is already formatted by the caller as `"<user-agent>:<cmd_basename>"`
+/// (matching PR1's `<agent>:<cmd>` convention so tile derivation buckets by command).
+/// `command` is just the basename (used for the rule's message synthesis when no
+/// explicit payload message is provided).
+pub fn map_watch_completed(
+    agent_name: &str,
+    command: &str,
+    exit_code: i32,
+    duration_ms: Option<u64>,
+    focus_uri: Option<String>,
+) -> Vec<Envelope> {
+    let host = hostname();
+    let os_user = os_user();
+    let device = device::device_id();
+    let source_pid = std::process::id();
+    let ts = now_unix_ms();
+
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from));
+    let project = cwd
+        .as_deref()
+        .and_then(|p| std::path::Path::new(p).file_name())
+        .map(|s| s.to_string_lossy().into_owned());
+    let shell = std::env::var("SHELL").ok().and_then(|s| {
+        std::path::Path::new(&s)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+    });
+
+    let (application, application_instance) = application_from_focus_uri(focus_uri.as_deref());
+
+    let context = Context {
+        agent: Some(agent_name.to_string()),
+        application,
+        application_instance,
+        focus_uri,
+        shell,
+        subapplication: tmux_subapplication(),
+        cwd: cwd.clone(),
+        workspace_root: cwd,
+        project,
+        env_vars_observed: env_capture::capture(),
+        ..Default::default()
+    };
+
+    let payload = Payload::WatchCompleted(WatchCompleted {
+        command: command.to_string(),
+        exit_code,
+        duration_ms,
+        message: None,  // rule synthesizes from command + exit_code
+    });
+
+    vec![Envelope {
+        id: ulid::Ulid::new().to_string(),
+        schema: 1,
+        ts,
+        seq: 0,
+        host,
+        os_user,
+        device_id: device,
+        source: "cli".to_string(),
+        source_pid,
+        type_: payload.type_str().to_string(),
+        correlation: None,
+        context: Some(context),
+        payload: payload.to_body_value(),
+    }]
 }
 
 // ---------- payload builders ----------
@@ -202,6 +356,8 @@ fn agent_notified(kind: &str, payload: &Value) -> Payload {
     Payload::AgentNotified(AgentNotified {
         kind: kind.to_string(),
         message,
+        severity_hint: None,
+        push_hint: None,
     })
 }
 
@@ -372,25 +528,7 @@ fn context_from(
     // (including any codex_editor fallback routing). Don't re-locate.
 
     // application + application_instance: parsed out of the focus_uri.
-    // Examples:
-    //   workspace://iterm2/window:1/tab:2          → app="iterm2", instance="window:1/tab:2"
-    //   workspace://vscode/window:80836/project:X  → app="vscode",  instance="window:80836"
-    //   workspace://codex                           → app="codex",   instance=None
-    let (application, application_instance) = focus_uri
-        .as_deref()
-        .and_then(crate::workspace::uri::parse_terminal_uri)
-        .map(|p| {
-            let mut parts = Vec::with_capacity(2);
-            if let Some(w) = p.window_id.as_deref() {
-                parts.push(format!("window:{}", w));
-            }
-            if let Some(t) = p.tab_id.as_deref() {
-                parts.push(format!("tab:{}", t));
-            }
-            let instance = if parts.is_empty() { None } else { Some(parts.join("/")) };
-            (Some(p.app), instance)
-        })
-        .unwrap_or((None, None));
+    let (application, application_instance) = application_from_focus_uri(focus_uri.as_deref());
 
     let ctx = Context {
         agent: Some(agent.slug().to_string()),
@@ -410,6 +548,30 @@ fn context_from(
         ..Default::default()
     };
     Some(ctx)
+}
+
+/// Parse a `focus_uri` into `(application, application_instance)`.
+///
+/// Examples:
+///   workspace://iterm2/window:1/tab:2          → ("iTerm2", "window:1/tab:2")
+///   workspace://vscode/window:80836/project:X  → ("vscode", "window:80836")
+///   workspace://codex                          → ("codex",  None)
+///   None                                       → (None,     None)
+fn application_from_focus_uri(focus_uri: Option<&str>) -> (Option<String>, Option<String>) {
+    focus_uri
+        .and_then(crate::workspace::uri::parse_terminal_uri)
+        .map(|p| {
+            let mut parts = Vec::with_capacity(2);
+            if let Some(w) = p.window_id.as_deref() {
+                parts.push(format!("window:{}", w));
+            }
+            if let Some(t) = p.tab_id.as_deref() {
+                parts.push(format!("tab:{}", t));
+            }
+            let instance = if parts.is_empty() { None } else { Some(parts.join("/")) };
+            (Some(p.app), instance)
+        })
+        .unwrap_or((None, None))
 }
 
 fn tmux_subapplication() -> Option<Subapplication> {
@@ -811,6 +973,178 @@ mod tests {
         assert_eq!(ctx.focus_uri, focus_uri);
         assert_eq!(ctx.application.as_deref(), Some("codex"));
         assert_eq!(ctx.application_instance, None);
+    }
+
+    #[test]
+    fn map_cli_notify_returns_one_envelope() {
+        let envs = map_cli_notify("test-agent", "hello world", None, None, None);
+        assert_eq!(envs.len(), 1);
+        let e = &envs[0];
+        assert_eq!(e.type_, "agent.notified");
+        assert_eq!(e.source, "cli");
+        assert_eq!(e.payload["kind"], "notification");
+        assert_eq!(e.payload["message"], "hello world");
+    }
+
+    #[test]
+    fn map_cli_notify_envelope_has_required_fields() {
+        let envs = map_cli_notify("a", "m", None, None, None);
+        let e = &envs[0];
+        assert_eq!(e.schema, 1);
+        assert!(e.ts > 0);
+        assert_eq!(e.id.len(), 26);
+        assert!(!e.host.is_empty());
+        assert!(!e.os_user.is_empty());
+        assert!(!e.device_id.is_empty());
+        assert_eq!(e.source, "cli");
+        assert_eq!(e.source_pid, std::process::id());
+        assert_eq!(e.seq, 0);
+        assert!(e.correlation.is_none());
+    }
+
+    #[test]
+    fn map_cli_notify_no_correlation() {
+        let envs = map_cli_notify("a", "m", None, None, None);
+        assert!(envs[0].correlation.is_none());
+    }
+
+    #[test]
+    fn map_cli_notify_populates_context_agent() {
+        let envs = map_cli_notify("claude-code:zestful", "hello", None, None, None);
+        let ctx = envs[0].context.as_ref().expect("expected Some(context)");
+        assert_eq!(ctx.agent.as_deref(), Some("claude-code:zestful"));
+    }
+
+    #[test]
+    fn map_cli_notify_with_focus_uri_parses_application_instance() {
+        let uri = "workspace://iterm2/window:1/tab:2".to_string();
+        let envs = map_cli_notify("a", "m", Some(uri.clone()), None, None);
+        let ctx = envs[0].context.as_ref().expect("expected Some(context)");
+        assert_eq!(ctx.focus_uri.as_deref(), Some(uri.as_str()));
+        assert_eq!(ctx.application.as_deref(), Some("iTerm2"));
+        assert_eq!(ctx.application_instance.as_deref(), Some("window:1/tab:2"));
+    }
+
+    #[test]
+    fn map_cli_notify_without_focus_uri_leaves_application_none() {
+        let envs = map_cli_notify("a", "m", None, None, None);
+        let ctx = envs[0].context.as_ref().expect("expected Some(context)");
+        assert_eq!(ctx.focus_uri, None);
+        assert_eq!(ctx.application, None);
+        assert_eq!(ctx.application_instance, None);
+    }
+
+    #[test]
+    fn map_cli_notify_truncates_long_message() {
+        let long = "x".repeat(MESSAGE_MAX + 200);
+        let envs = map_cli_notify("a", &long, None, None, None);
+        let msg = envs[0].payload["message"].as_str().unwrap();
+        assert_eq!(msg.len(), MESSAGE_MAX);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn map_cli_notify_with_tmux_env_populates_subapplication() {
+        let prior_tmux = std::env::var("TMUX").ok();
+        let prior_pane = std::env::var("TMUX_PANE").ok();
+        unsafe {
+            std::env::set_var("TMUX", "/tmp/tmux-501/default,12345,3");
+            std::env::set_var("TMUX_PANE", "%7");
+        }
+
+        let envs = map_cli_notify("a", "m", None, None, None);
+        let ctx = envs[0].context.as_ref().expect("expected Some(context)");
+        let sub = ctx.subapplication.as_ref().expect("expected Some(subapplication)");
+
+        // Restore env BEFORE asserting so a failure doesn't leak state.
+        unsafe {
+            match prior_tmux {
+                Some(v) => std::env::set_var("TMUX", v),
+                None    => std::env::remove_var("TMUX"),
+            }
+            match prior_pane {
+                Some(v) => std::env::set_var("TMUX_PANE", v),
+                None    => std::env::remove_var("TMUX_PANE"),
+            }
+        }
+
+        assert_eq!(sub.kind, "tmux");
+        assert_eq!(sub.session.as_deref(), Some("3"));
+        assert_eq!(sub.pane.as_deref(), Some("%7"));
+    }
+
+    #[test]
+    fn map_cli_notify_carries_severity_hint() {
+        let envs = map_cli_notify("a", "m", None, Some(Severity::Urgent), None);
+        let p = &envs[0].payload;
+        assert_eq!(p["severity_hint"], "urgent");
+    }
+
+    #[test]
+    fn map_cli_notify_carries_push_hint() {
+        let envs = map_cli_notify("a", "m", None, None, Some(false));
+        let p = &envs[0].payload;
+        assert_eq!(p["push_hint"], false);
+    }
+
+    #[test]
+    fn map_cli_notify_omits_hints_when_none() {
+        let envs = map_cli_notify("a", "m", None, None, None);
+        let p = &envs[0].payload;
+        assert!(p.get("severity_hint").is_none());
+        assert!(p.get("push_hint").is_none());
+    }
+
+    #[test]
+    fn map_watch_completed_returns_one_envelope_with_correct_shape() {
+        let envs = map_watch_completed("watch:npm", "npm", 0, Some(1234), None);
+        assert_eq!(envs.len(), 1);
+        let e = &envs[0];
+        assert_eq!(e.type_, "watch.completed");
+        assert_eq!(e.source, "cli");
+        assert_eq!(e.payload["command"], "npm");
+        assert_eq!(e.payload["exit_code"], 0);
+        assert_eq!(e.payload["duration_ms"], 1234);
+    }
+
+    #[test]
+    fn map_watch_completed_envelope_has_required_fields() {
+        let envs = map_watch_completed("watch:x", "x", 1, None, None);
+        let e = &envs[0];
+        assert_eq!(e.schema, 1);
+        assert!(e.ts > 0);
+        assert_eq!(e.id.len(), 26);
+        assert!(!e.host.is_empty());
+        assert!(!e.os_user.is_empty());
+        assert!(!e.device_id.is_empty());
+        assert_eq!(e.source, "cli");
+        assert_eq!(e.source_pid, std::process::id());
+        assert_eq!(e.seq, 0);
+        assert!(e.correlation.is_none());
+    }
+
+    #[test]
+    fn map_watch_completed_populates_context_agent() {
+        let envs = map_watch_completed("buildbot:make", "make", 0, None, None);
+        let ctx = envs[0].context.as_ref().expect("expected Some(context)");
+        assert_eq!(ctx.agent.as_deref(), Some("buildbot:make"));
+    }
+
+    #[test]
+    fn map_watch_completed_omits_optional_payload_fields_when_none() {
+        let envs = map_watch_completed("watch:x", "x", 0, None, None);
+        let p = &envs[0].payload;
+        assert!(p.get("duration_ms").is_none());
+        assert!(p.get("message").is_none());
+    }
+
+    #[test]
+    fn map_watch_completed_includes_focus_uri_in_context() {
+        let uri = "workspace://iterm2/window:1/tab:2".to_string();
+        let envs = map_watch_completed("watch:x", "x", 0, None, Some(uri.clone()));
+        let ctx = envs[0].context.as_ref().expect("expected Some(context)");
+        assert_eq!(ctx.focus_uri.as_deref(), Some(uri.as_str()));
+        assert_eq!(ctx.application.as_deref(), Some("iTerm2"));
     }
 
 }
