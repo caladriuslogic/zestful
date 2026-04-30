@@ -8,7 +8,7 @@ mod keys;
 mod ui;
 
 use anyhow::Result;
-use crossterm::{event::{Event as CtEvent, EventStream}, execute, terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}};
+use crossterm::{event::{Event as CtEvent, EventStream, KeyEventKind}, execute, terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}};
 use futures::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, time::{Duration, Instant}};
@@ -83,9 +83,11 @@ async fn main_loop(term: &mut Terminal<CrosstermBackend<io::Stdout>>, modal: boo
 
             Some(Ok(ev)) = keys.next() => {
                 if let CtEvent::Key(k) = ev {
-                    if let Some(action) = key_to_action(k, state.input_mode) {
-                        let fx = state.apply(action);
-                        if let Some(c) = client.as_ref() { run_side_effects(c, &mut state, fx).await; }
+                    if k.kind == KeyEventKind::Press {
+                        if let Some(action) = key_to_action(k, state.input_mode) {
+                            let fx = state.apply(action);
+                            if let Some(c) = client.as_ref() { run_side_effects(c, &mut state, fx).await; }
+                        }
                     }
                 }
             }
