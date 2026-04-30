@@ -74,25 +74,6 @@ pub fn upsert(conn: &Connection, s: &FileState) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// List every tracked path. Used by the periodic rescan to know which
-/// files to compare against disk.
-pub fn all_paths(conn: &Connection) -> rusqlite::Result<Vec<FileState>> {
-    let mut stmt = conn.prepare(
-        "SELECT path, agent, fingerprint, last_offset, last_emit_ts \
-         FROM scraper_file_state",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(FileState {
-            path: row.get(0)?,
-            agent: row.get(1)?,
-            fingerprint: row.get(2)?,
-            last_offset: row.get::<_, i64>(3)? as u64,
-            last_emit_ts: row.get(4)?,
-        })
-    })?;
-    rows.collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,21 +132,4 @@ mod tests {
         assert_eq!(got.last_emit_ts, 2);
     }
 
-    #[test]
-    fn all_paths_returns_every_row() {
-        let c = open();
-        for i in 0..3 {
-            upsert(&c, &FileState {
-                path: format!("/tmp/{}.jsonl", i),
-                agent: "claude-code".into(),
-                fingerprint: format!("0:{}", i),
-                last_offset: i,
-                last_emit_ts: i as i64,
-            }).unwrap();
-        }
-        let mut paths: Vec<String> =
-            all_paths(&c).unwrap().into_iter().map(|s| s.path).collect();
-        paths.sort();
-        assert_eq!(paths, vec!["/tmp/0.jsonl", "/tmp/1.jsonl", "/tmp/2.jsonl"]);
-    }
 }

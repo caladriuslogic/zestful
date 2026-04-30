@@ -6,17 +6,25 @@
 //! to surface events; we use a 5s ceiling. This test does NOT validate
 //! parsing correctness — that's covered by per-parser unit tests.
 
+use serial_test::serial;
 use std::io::Write;
 use std::time::Duration;
 
+// Both tests in this file spin up a real notify-rs watcher. macOS FSEvents
+// + parallel test execution makes them race; the second test's writes can
+// land before its watcher is fully registered, causing intermittent timeouts.
+// Serializing on a named lock keeps them deterministic without forcing the
+// whole test suite to --test-threads=1.
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(notify_watcher)]
 async fn real_watcher_emits_file_changed_within_5s() {
     let tmp = tempfile::tempdir().unwrap();
     // Canonicalize so we match notify-rs's reported path on macOS, where
     // /var/folders is reported as /private/var/folders by FSEvents.
     let target = std::fs::canonicalize(tmp.path()).unwrap();
 
-    let mut rx = zestful::scraper_watcher_spawn_real_for_tests(
+    let mut rx = zestful::scraper::watcher::spawn_real(
         vec![target.clone()],
         Duration::from_secs(3600), // long rescan: don't let it interfere
     );
@@ -48,11 +56,12 @@ async fn real_watcher_emits_file_changed_within_5s() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(notify_watcher)]
 async fn real_watcher_rescan_recovers_missed_event() {
     let tmp = tempfile::tempdir().unwrap();
     let target = tmp.path().to_path_buf();
 
-    let mut rx = zestful::scraper_watcher_spawn_real_for_tests(
+    let mut rx = zestful::scraper::watcher::spawn_real(
         vec![target.clone()],
         Duration::from_millis(200), // fast rescan for the test
     );
