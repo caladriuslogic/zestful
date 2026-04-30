@@ -23,6 +23,11 @@ pub struct ListFilters {
     pub session_id: Option<String>,
     /// Exact match on context.agent via json_extract.
     pub agent: Option<String>,
+    /// Match events belonging to a specific surface. Uses a CASE expression
+    /// that mirrors the tiles projection's surface_token derivation:
+    /// tmux pane → "tmux:{session}/pane:{pane}"; vscode → "vscode-window:{pid}";
+    /// other CLI → context.application_instance; zestful-app → context.surface_token.
+    pub surface_token: Option<String>,
 }
 
 /// Opaque pagination cursor. Produced by `list()`, passed back to the
@@ -131,6 +136,20 @@ pub fn list(
     if let Some(a) = &filters.agent {
         sql.push_str(" AND json_extract(context, '$.agent') = ?");
         params.push(Box::new(a.clone()));
+    }
+    if let Some(st) = &filters.surface_token {
+        sql.push_str(
+            " AND CASE \
+              WHEN json_extract(context, '$.subapplication.kind') = 'tmux' \
+                THEN 'tmux:' || json_extract(context, '$.subapplication.session') \
+                     || '/pane:' || json_extract(context, '$.subapplication.pane') \
+              WHEN source = 'vscode-extension' \
+                THEN 'vscode-window:' || json_extract(context, '$.application_instance') \
+              ELSE COALESCE(json_extract(context, '$.application_instance'), \
+                            json_extract(context, '$.surface_token')) \
+            END = ?",
+        );
+        params.push(Box::new(st.clone()));
     }
     if let Some(c) = cursor {
         sql.push_str(" AND (received_at < ? OR (received_at = ? AND id < ?))");

@@ -82,15 +82,19 @@ impl Client {
         Ok(body.notifications)
     }
 
-    pub async fn events_for_agent(&self, agent: &str, since_ms: i64, limit: usize) -> Result<Vec<EventRow>> {
+    pub async fn events_for_agent(&self, agent: &str, surface_token: Option<&str>, since_ms: i64, limit: usize) -> Result<Vec<EventRow>> {
+        let mut query = vec![
+            ("agent".to_string(), agent.to_string()),
+            ("since".to_string(), since_ms.to_string()),
+            ("limit".to_string(), limit.to_string()),
+        ];
+        if let Some(st) = surface_token {
+            query.push(("surface_token".to_string(), st.to_string()));
+        }
         let resp = self.http
             .get(format!("{}/events", self.base_url))
             .header("X-Zestful-Token", &self.token)
-            .query(&[
-                ("agent", agent.to_string()),
-                ("since", since_ms.to_string()),
-                ("limit", limit.to_string()),
-            ])
+            .query(&query)
             .send().await
             .context("GET /events")?;
         check_status(&resp).await?;
@@ -261,7 +265,7 @@ mod tests {
         }));
         let url = spawn_test_daemon(router).await;
         let c = Client::new(&url, "x").unwrap();
-        let evs = c.events_for_agent("claude-code", 0, 50).await.unwrap();
+        let evs = c.events_for_agent("claude-code", None, 0, 50).await.unwrap();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].event_type, "turn.completed");
     }
