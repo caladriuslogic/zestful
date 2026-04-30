@@ -6,6 +6,7 @@
 
 mod state;
 pub mod parsers;
+pub mod pricing;
 
 use tokio::task::JoinHandle;
 
