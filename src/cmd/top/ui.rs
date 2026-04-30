@@ -273,7 +273,7 @@ pub fn draw_detail_pane(f: &mut Frame, area: Rect, state: &AppState) {
     )));
     lines.push(Line::from(""));
 
-    lines.push(Line::from(Span::styled("Activity (last hour)", Style::default().add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(Span::styled("Activity (last 24 hours)", Style::default().add_modifier(Modifier::BOLD))));
     let bins = crate::cmd::top::app::sparkline_bins(&state.recent_events, now);
     lines.push(Line::from(Span::styled(
         sparkline_glyphs(&bins),
