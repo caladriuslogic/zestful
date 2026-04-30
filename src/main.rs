@@ -6,16 +6,6 @@
 
 use zestful::cmd;
 use zestful::config;
-#[allow(unused_imports)]
-use zestful::events;
-#[allow(unused_imports)]
-use zestful::hooks;
-#[allow(unused_imports)]
-use zestful::log;
-#[allow(unused_imports)]
-use zestful::scraper;
-#[allow(unused_imports)]
-use zestful::workspace;
 
 use clap::{Parser, Subcommand};
 
