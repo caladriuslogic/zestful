@@ -702,7 +702,7 @@ async fn handle_notifications(
     }
 }
 
-async fn handle_stream(
+pub(crate) async fn handle_stream(
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     // Same token gate as /events, /tiles, /notifications.

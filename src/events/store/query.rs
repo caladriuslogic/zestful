@@ -2,7 +2,7 @@
 //! handler and the `zestful events` CLI subcommands.
 
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Filters for list / count queries. All fields are optional; each
 /// populated field contributes an `AND` clause to the generated SQL.
@@ -53,7 +53,7 @@ impl std::fmt::Display for Cursor {
     }
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct EventRow {
     pub id: i64,
     pub received_at: i64,

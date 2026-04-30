@@ -117,6 +117,22 @@ zestful inspect tmux --pretty       # just tmux sessions
 
 Subcommands: `terminals`, `tmux`, `shelldon`, `zellij`, `ides`, `browsers`, `where`, `all` (default).
 
+### `zestful top`
+
+A live, colorful TUI dashboard of agent activity, sourced exclusively from
+the daemon's HTTP + SSE API. Master-detail layout: tiles list on the left,
+selected tile's metadata, sparkline, recent events, and notifications on
+the right.
+
+- **Live** via `GET /stream` (SSE). No polling.
+- **Interactive** — `Enter` invokes `POST /focus` to surface the agent's window.
+- **Network-only** — also serves as a reference client validating the macOS
+  app's contract from any platform (Linux, Windows, remote SSH).
+
+Press `?` inside the TUI for the full keybinding reference.
+
+Requires the Zestful daemon to be running.
+
 ### Severity Levels
 
 | Level | Overlay | Menu Bar |

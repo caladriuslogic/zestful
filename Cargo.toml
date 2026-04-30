@@ -19,6 +19,9 @@ once_cell = "1"
 rusqlite = { version = "0.33", features = ["bundled"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+reqwest-eventsource = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [

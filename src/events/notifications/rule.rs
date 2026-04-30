@@ -8,6 +8,26 @@
 pub use crate::events::severity::Severity;
 use crate::events::store::query::EventRow;
 use crate::events::tiles::tile::Tile;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Info,
+    Warn,
+    Urgent,
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Severity::Info => "info",
+            Severity::Warn => "warn",
+            Severity::Urgent => "urgent",
+        };
+        f.write_str(s)
+    }
+}
 
 /// Per-firing fields a Rule produces. The engine fills in the
 /// identity-derived fields (id, rule_id, tile_id) and the tile-copied
