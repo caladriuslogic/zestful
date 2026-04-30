@@ -4,6 +4,8 @@
 //! Spec: docs/superpowers/specs/2026-04-30-agent-scraper-design.md
 //! On by default; disable via settings key `scraper.enabled = false`.
 
+mod state;
+
 use tokio::task::JoinHandle;
 
 /// Spawn the scraper subsystem. Returns a handle the caller may join on
