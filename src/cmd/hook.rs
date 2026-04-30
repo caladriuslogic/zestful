@@ -94,7 +94,20 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
     // (common when the agent's hook subprocess isn't a child of the editor
     // process we know about — e.g. Cursor's AI agent), fall back to a
     // project-level URI synthesized from the payload for IDE-family agents.
-    let terminal_uri = crate::workspace::locate().ok().or_else(|| {
+    let terminal_uri = crate::workspace::locate().ok().map(|uri| {
+        // For IDE URIs (code/cursor/windsurf) without a project: segment,
+        // append the project name from the payload's cwd so that focus_by_pid
+        // can look up the workspace folder via storage.json. The process CWD
+        // at hook time is unreliable (.claude subdir), but the payload cwd is correct.
+        let is_ide = uri.starts_with("workspace://code/")
+            || uri.starts_with("workspace://cursor/")
+            || uri.starts_with("workspace://windsurf/");
+        if is_ide && !project.is_empty() && !uri.contains("/project:") {
+            format!("{}/project:{}", uri, project)
+        } else {
+            uri
+        }
+    }).or_else(|| {
         // Cursor hook: synthesize a workspace-level URI when the hook's
         // parent chain doesn't reach the Cursor extension host. Cursor spawns
         // hooks from a sibling process of the extension host, so the ancestor

@@ -45,9 +45,8 @@ pub fn locate() -> Result<String> {
         } else if let Some((app, pid)) = find_classic_console() {
             segments.push(app.clone());
             segments.push(format!("window:{}", pid));
-            // Console hosts (powershell, cmd) add tab:1 to match detect()'s URI format.
-            // IDE processes (code, cursor, windsurf) keep the bare window:<pid> form
-            // that surface_label recognises as "VS Code window".
+            // Console hosts add tab:1 to match detect()'s URI format.
+            // IDE processes keep the bare window:<pid> form.
             if matches!(app.as_str(), "powershell" | "cmd") {
                 segments.push("tab:1".to_string());
             }
@@ -840,4 +839,3 @@ fn detect_shelldon() -> Result<Option<Vec<String>>> {
 
     Ok(Some(vec!["shelldon".into()]))
 }
-

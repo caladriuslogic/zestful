@@ -175,17 +175,26 @@ fn window_folder(win: &Value) -> Option<String> {
 /// (`~/.config/zestful/vscode/<pid>.json`) to get the workspace folder, then
 /// calls `<editor>.cmd --reuse-window <folder>` so the IPC mechanism routes to
 /// the correct existing window rather than opening a new instance.
-pub async fn focus_by_pid(family: Family, window_id: &str, _project_id: Option<&str>) -> Result<()> {
+pub async fn focus_by_pid(family: Family, window_id: &str, project_id: Option<&str>) -> Result<()> {
     let pid: u32 = window_id
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid window pid: {}", window_id))?;
     let cli = family.cli_name();
+    let project_id = project_id.map(String::from);
     tokio::task::spawn_blocking(move || {
-        if let Some(folder) = read_workspace_folder_for_pid(pid) {
+        // PID-based lookup works when the Zestful extension is running and the
+        // state file PID matches the process find_classic_console() found.
+        // Fallback: use project_id (CWD basename embedded in the URI by locate())
+        // to look up the full path from the editor's own storage.json.
+        let folder = read_workspace_folder_for_pid(pid)
+            .or_else(|| project_id.as_deref().and_then(|id| lookup_project_path(family, id)));
+        if let Some(folder) = folder {
+            crate::log::log("focus-by-pid", &format!("pid={} cli={} folder={}", pid, cli, folder));
             let _ = Command::new("cmd")
                 .args(["/c", cli, "--reuse-window", &folder])
                 .spawn();
         } else {
+            crate::log::log("focus-by-pid", &format!("pid={} cli={} no folder found — spawning without --reuse-window", pid, cli));
             let _ = Command::new("cmd").args(["/c", cli]).spawn();
         }
     })
@@ -193,8 +202,8 @@ pub async fn focus_by_pid(family: Family, window_id: &str, _project_id: Option<&
     Ok(())
 }
 
-/// Read the `workspaceFolder` from the Zestful VS Code extension state file
-/// for the given window PID.
+/// Read the `workspaceFolder` from the Zestful extension state file for the
+/// given PID (exact match only — the PID must equal the extension host's windowPid).
 fn read_workspace_folder_for_pid(pid: u32) -> Option<String> {
     let state_file = crate::config::config_dir()
         .join("vscode")
