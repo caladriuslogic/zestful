@@ -9,6 +9,7 @@ mod config;
 mod events;
 pub mod hooks;
 pub mod log;
+mod scraper;
 pub mod workspace;
 
 use clap::{Parser, Subcommand};

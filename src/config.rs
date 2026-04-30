@@ -191,6 +191,26 @@ fn libc_kill(pid: i32) -> bool {
     }
 }
 
+/// Read the `scraper.enabled` setting. Defaults to `true` when unset
+/// or unreadable. The scraper is on by default.
+pub fn scraper_enabled() -> bool {
+    read_settings_bool("scraper.enabled").unwrap_or(true)
+}
+
+/// Read a boolean from `~/.config/zestful/settings.json` at the given
+/// dotted path (e.g. `"scraper.enabled"`). Returns `None` if the file
+/// is missing, unparseable, or the key is absent.
+fn read_settings_bool(dotted_path: &str) -> Option<bool> {
+    let path = config_dir().join("settings.json");
+    let bytes = std::fs::read(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let mut cur = &v;
+    for segment in dotted_path.split('.') {
+        cur = cur.get(segment)?;
+    }
+    cur.as_bool()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
