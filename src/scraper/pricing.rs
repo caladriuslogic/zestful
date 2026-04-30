@@ -46,9 +46,8 @@ const PRICES: &[(&str, PriceBreakdown)] = &[
     ("claude-3-5-sonnet-latest",   SONNET_3X_PRICES),
     ("claude-3-7-sonnet-20250219", SONNET_3X_PRICES),
     ("claude-3-7-sonnet-latest",   SONNET_3X_PRICES),
-    // Claude 4.x family — placeholder values pending verification against
-    // current Anthropic pricing page; may need adjustment when published numbers
-    // settle. The unknown-model code path is the safety net for stale entries.
+    // Claude 4.x family — placeholders matching pricing-page values as of
+    // plan date; verify and update before commit.
     ("claude-opus-4-7", PriceBreakdown {
         input_per_mtoken:       15.00,
         output_per_mtoken:      75.00,
