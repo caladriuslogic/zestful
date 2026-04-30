@@ -43,8 +43,14 @@ pub fn locate() -> Result<String> {
                 segments.push(format!("tab:{}", idx));
             }
         } else if let Some((app, pid)) = find_classic_console() {
-            segments.push(app);
+            segments.push(app.clone());
             segments.push(format!("window:{}", pid));
+            // Console hosts (powershell, cmd) add tab:1 to match detect()'s URI format.
+            // IDE processes (code, cursor, windsurf) keep the bare window:<pid> form
+            // that surface_label recognises as "VS Code window".
+            if matches!(app.as_str(), "powershell" | "cmd") {
+                segments.push("tab:1".to_string());
+            }
         }
     }
 
@@ -242,15 +248,18 @@ fn find_classic_console() -> Option<(String, String)> {
     // second. We want the inner one so each window gets a distinct surface token.
     let script = format!(
         r#"
-$stopNames  = @('explorer.exe','wininit.exe','services.exe','svchost.exe','lsass.exe')
-$ideNames   = @('code.exe','cursor.exe','windsurf.exe')
+$stopNames    = @('explorer.exe','wininit.exe','services.exe','svchost.exe','lsass.exe')
+$ideNames     = @('code.exe','cursor.exe','windsurf.exe')
+$consoleNames = @('powershell.exe','pwsh.exe','cmd.exe')
 $procMap = @{{}}
 Get-CimInstance Win32_Process | ForEach-Object {{
     $procMap[[uint32]$_.ProcessId] = [PSCustomObject]@{{ ppid = [uint32]$_.ParentProcessId; name = $_.Name.ToLower() }}
 }}
 $cur = [uint32]{our_pid}
-$winPid  = $null
-$winName = $null
+$winPid      = $null
+$winName     = $null
+$consolePid  = $null
+$consoleName = $null
 for ($i = 0; $i -lt 30 -and $cur -gt 1; $i++) {{
     $entry = $procMap[$cur]
     if (-not $entry) {{ [Console]::Error.WriteLine("cc-walk: pid=$cur not in map, stopping"); break }}
@@ -261,7 +270,15 @@ for ($i = 0; $i -lt 30 -and $cur -gt 1; $i++) {{
         $winName = $entry.name -replace '\.exe$',''
         break
     }}
+    if ($consoleNames -contains $entry.name -and -not $consolePid) {{
+        $consolePid  = $cur
+        $consoleName = if ($entry.name -eq 'cmd.exe') {{ 'cmd' }} else {{ 'powershell' }}
+    }}
     $cur = $entry.ppid
+}}
+if (-not $winPid -and $consolePid) {{
+    $winPid  = $consolePid
+    $winName = $consoleName
 }}
 [Console]::Error.WriteLine("cc-walk: result name=$winName pid=$winPid")
 if ($winPid) {{ Write-Output "$winName|$winPid" }}

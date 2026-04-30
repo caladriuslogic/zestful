@@ -88,6 +88,9 @@ pub fn surface_label(surface_kind: &str, surface_token: &str, app_slug: Option<&
                         Some("terminal") => "Terminal",
                         Some("wezterm") => "WezTerm",
                         Some("kitty") => "Kitty",
+                        Some("powershell") => "PowerShell",
+                        Some("cmd") => "Command Prompt",
+                        Some("windows-terminal") => "Windows Terminal",
                         _ => "Terminal",
                     };
                     return format!("{} window {} / tab {}", app_name, win, tab_part);
@@ -362,6 +365,30 @@ mod tests {
         assert_eq!(
             surface_label("cli", "window:80836", None),
             "VS Code window 80836"
+        );
+    }
+
+    #[test]
+    fn surface_label_cli_powershell() {
+        assert_eq!(
+            surface_label("cli", "window:59388/tab:1", Some("powershell")),
+            "PowerShell window 59388 / tab 1"
+        );
+    }
+
+    #[test]
+    fn surface_label_cli_cmd() {
+        assert_eq!(
+            surface_label("cli", "window:1234/tab:1", Some("cmd")),
+            "Command Prompt window 1234 / tab 1"
+        );
+    }
+
+    #[test]
+    fn surface_label_cli_windows_terminal() {
+        assert_eq!(
+            surface_label("cli", "window:131072/tab:59388", Some("windows-terminal")),
+            "Windows Terminal window 131072 / tab 59388"
         );
     }
 
