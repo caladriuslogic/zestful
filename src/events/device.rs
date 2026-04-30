@@ -11,6 +11,35 @@ use std::path::PathBuf;
 
 const DEVICE_FILE: &str = "device.id";
 
+/// Return the host name. Resolution order: `$HOSTNAME` env var, `hostname(1)`
+/// shell command, then literal `"unknown"`. Mirrors the private helper in
+/// `events::map`; surfaced here so non-hook emitters (scraper, etc.) can
+/// build envelopes with the same value the HTTP `/events` path uses.
+pub fn host() -> String {
+    if let Ok(name) = std::env::var("HOSTNAME") {
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    if let Ok(output) = std::process::Command::new("hostname").output() {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    "unknown".into()
+}
+
+/// Return the OS user name. Resolution order: `$USER`, `$USERNAME`, then
+/// literal `"unknown"`. Mirrors the private helper in `events::map`.
+pub fn os_user() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".into())
+}
+
 /// Return the stable device ID, creating it on first call if needed.
 ///
 /// On read/write errors, returns a session-scoped fallback ULID so emitters

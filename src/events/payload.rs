@@ -45,6 +45,9 @@ pub enum Payload {
 
     #[serde(rename = "session.started")]
     SessionStarted(SessionStarted),
+
+    #[serde(rename = "turn.metrics")]
+    TurnMetrics(TurnMetrics),
 }
 
 impl Payload {
@@ -60,6 +63,7 @@ impl Payload {
             Payload::AgentNotified(_) => "agent.notified",
             Payload::WatchCompleted(_) => "watch.completed",
             Payload::SessionStarted(_) => "session.started",
+            Payload::TurnMetrics(_) => "turn.metrics",
         }
     }
 
@@ -77,6 +81,7 @@ impl Payload {
             Payload::AgentNotified(p) => serde_json::to_value(p).unwrap_or_default(),
             Payload::WatchCompleted(p) => serde_json::to_value(p).unwrap_or_default(),
             Payload::SessionStarted(p) => serde_json::to_value(p).unwrap_or_default(),
+            Payload::TurnMetrics(p) => serde_json::to_value(p).unwrap_or_default(),
         }
     }
 }
@@ -171,6 +176,34 @@ pub struct WatchCompleted {
 pub struct SessionStarted {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct TurnMetrics {
+    pub model: String,
+    pub tokens: TurnTokens,
+    pub context: TurnContext,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cost_estimate_usd: Option<f64>,
+    pub message_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct TurnTokens {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub reasoning: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct TurnContext {
+    pub used_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ratio: Option<f64>,
 }
 
 #[cfg(test)]
