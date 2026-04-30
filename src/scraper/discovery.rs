@@ -88,7 +88,7 @@ mod tests {
     use serial_test::serial;
 
     #[test]
-    #[serial]
+    #[serial(zestful_env)]
     fn defaults_present_when_no_env_or_settings() {
         std::env::remove_var("ZESTFUL_CLAUDE_ROOT");
         std::env::remove_var("ZESTFUL_CODEX_ROOT");
@@ -98,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(zestful_env)]
     fn env_override_wins_for_claude() {
         std::env::set_var("ZESTFUL_CLAUDE_ROOT", "/tmp/custom-claude");
         let roots = resolve_roots();
@@ -108,7 +108,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(zestful_env)]
     fn env_override_wins_for_codex() {
         std::env::set_var("ZESTFUL_CODEX_ROOT", "/tmp/custom-codex");
         let roots = resolve_roots();
