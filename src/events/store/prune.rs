@@ -133,10 +133,12 @@ mod tests {
         for i in 0..30 {
             insert(&conn, &fixture(&format!("{:03}", i), 10)).unwrap();
         }
-        // Cap at 175 KB — should prune roughly half the rows. The original
-        // 150 KB target was below the ~163 KB vacuum floor for the events
-        // schema (16 columns + 4 indexes), so 150 KB is physically unreachable.
-        let cap = 175 * 1024;
+        // Cap at 256 KB — should prune roughly half the rows. The vacuum
+        // floor of the schema (events table with 16 columns + 4 indexes,
+        // plus migration 002's scraper_file_state with 1 index) sits around
+        // 184 KB on an empty DB; below that and the cap is physically
+        // unreachable.
+        let cap = 256 * 1024;
         let out = check_and_enforce(&conn, cap).unwrap();
         match out {
             PruneOutcome::Pruned { rows_deleted, final_bytes } => {

@@ -125,7 +125,7 @@ mod tests {
         conn.pragma_update(None, "auto_vacuum", "INCREMENTAL").unwrap();
         schema::run_migrations(&conn).expect("migrations should succeed on empty file");
 
-        assert_eq!(schema::current_version(&conn).unwrap(), 1);
+        assert_eq!(schema::current_version(&conn).unwrap(), 2);
 
         // PRAGMAs should have landed — catch silent WAL downgrades.
         let mode: String = conn
