@@ -154,6 +154,12 @@ fn parse_line(
                 reasoning: u(last, "reasoning_output_tokens"),
             };
 
+            let ts_ms = v
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .and_then(parse_iso8601_ms)
+                .unwrap_or(0);
+
             // Prefer a turn_id carried on this line; otherwise the most
             // recent turn_context's turn_id; otherwise a deterministic
             // hash so the dispatch loop can dedupe.
@@ -170,13 +176,7 @@ fn parse_line(
                         Some(current_turn_id.clone())
                     }
                 })
-                .unwrap_or_else(|| derive_turn_id(session_id, current_model, &tokens));
-
-            let ts_ms = v
-                .get("timestamp")
-                .and_then(|t| t.as_str())
-                .and_then(parse_iso8601_ms)
-                .unwrap_or(0);
+                .unwrap_or_else(|| derive_turn_id(session_id, current_model, &tokens, ts_ms));
 
             Some(TurnRecord {
                 session_id: session_id.to_string(),
@@ -197,13 +197,18 @@ fn u(v: &Value, key: &str) -> u64 {
 }
 
 /// Stable turn_id when no `turn_context.turn_id` is available. Derived
-/// from immutable per-turn data so a re-parse of the same line yields
-/// the same id (the dispatch loop dedupes on (session_id, turn_id)).
-fn derive_turn_id(session_id: &str, model: &str, t: &Tokens) -> String {
+/// from immutable per-turn data — including ts_ms — so a re-parse of the
+/// same line yields the same id, but two consecutive turns with identical
+/// token counts (round-numbered cached prompts are common) don't collide
+/// and silently merge. The dispatch loop dedupes on (session_id, turn_id);
+/// a collision here would silently drop a turn.
+fn derive_turn_id(session_id: &str, model: &str, t: &Tokens, ts_ms: i64) -> String {
     let mut h = Sha256::new();
     h.update(session_id.as_bytes());
     h.update(b"|");
     h.update(model.as_bytes());
+    h.update(b"|");
+    h.update(ts_ms.to_le_bytes());
     h.update(b"|");
     h.update(t.input.to_le_bytes());
     h.update(t.output.to_le_bytes());
@@ -305,9 +310,113 @@ mod tests {
         let first_nl = bytes.iter().position(|&b| b == b'\n').unwrap();
         let resume = p.parse_from(&fixture("turn_complete.jsonl"),
                                   (first_nl + 1) as u64).unwrap();
+        // Guard against a regression that empties records — the loop below
+        // would otherwise vacuously pass.
+        assert!(
+            !resume.records.is_empty(),
+            "resume after header should still emit a turn"
+        );
         for r in &resume.records {
             assert!(!r.session_id.is_empty(),
                     "session_id must be recovered from header even after resume");
+        }
+    }
+
+    /// Synthetic-line tests that exercise the four documented skip rules
+    /// directly via parse_line, without needing a fixture file. These
+    /// catch regressions in the dispatch logic that the fixture-based
+    /// tests don't cover (the fixture happens to contain only the happy
+    /// path plus one info-bearing token_count line).
+    mod skip_rules {
+        use super::super::*;
+        use crate::scraper::parsers::Tokens;
+        use serde_json::json;
+
+        fn run(line: serde_json::Value) -> Option<TurnRecord> {
+            let mut model = String::new();
+            let mut turn_id = String::new();
+            let s = line.to_string() + "\n";
+            parse_line(&s, "sess_test", &mut model, &mut turn_id)
+        }
+
+        fn run_with_ctx(line: serde_json::Value, model: &str) -> Option<TurnRecord> {
+            let mut m = model.to_string();
+            let mut t = String::new();
+            let s = line.to_string() + "\n";
+            parse_line(&s, "sess_test", &mut m, &mut t)
+        }
+
+        #[test]
+        fn skips_response_item() {
+            let line = json!({"timestamp": "2026-04-30T00:00:00.000Z", "type": "response_item",
+                              "payload": {"type": "message", "content": "hi"}});
+            assert!(run(line).is_none());
+        }
+
+        #[test]
+        fn skips_event_msg_non_token_count() {
+            let line = json!({"timestamp": "2026-04-30T00:00:00.000Z", "type": "event_msg",
+                              "payload": {"type": "thread_id", "thread_id": "abc"}});
+            assert!(run(line).is_none());
+        }
+
+        #[test]
+        fn skips_token_count_with_null_info() {
+            let line = json!({"timestamp": "2026-04-30T00:00:00.000Z", "type": "event_msg",
+                              "payload": {"type": "token_count", "info": null}});
+            assert!(run_with_ctx(line, "gpt-5.4").is_none());
+        }
+
+        #[test]
+        fn skips_token_count_before_any_turn_context() {
+            // current_model is empty → skip even if info is present.
+            let line = json!({"timestamp": "2026-04-30T00:00:00.000Z", "type": "event_msg",
+                              "payload": {"type": "token_count", "info": {
+                                  "last_token_usage": {"input_tokens": 100, "output_tokens": 50,
+                                                       "cached_input_tokens": 0, "reasoning_output_tokens": 0}}}});
+            assert!(run(line).is_none());
+        }
+
+        #[test]
+        fn turn_context_updates_state() {
+            let mut model = String::new();
+            let mut turn_id = String::new();
+            let line = json!({"timestamp": "2026-04-30T00:00:00.000Z", "type": "turn_context",
+                              "payload": {"model": "gpt-5.4", "turn_id": "t-123"}});
+            let s = line.to_string() + "\n";
+            let rec = parse_line(&s, "sess_test", &mut model, &mut turn_id);
+            // turn_context never produces a record itself.
+            assert!(rec.is_none());
+            // But it updates the carried state.
+            assert_eq!(model, "gpt-5.4");
+            assert_eq!(turn_id, "t-123");
+        }
+
+        #[test]
+        fn token_count_with_info_after_turn_context_emits_record() {
+            let mut model = "gpt-5.4".to_string();
+            let mut turn_id = "t-123".to_string();
+            let line = json!({"timestamp": "2026-04-30T00:00:00.000Z", "type": "event_msg",
+                              "payload": {"type": "token_count", "info": {
+                                  "last_token_usage": {"input_tokens": 100, "output_tokens": 50,
+                                                       "cached_input_tokens": 10, "reasoning_output_tokens": 5}}}});
+            let s = line.to_string() + "\n";
+            let rec = parse_line(&s, "sess_test", &mut model, &mut turn_id).unwrap();
+            assert_eq!(rec.session_id, "sess_test");
+            assert_eq!(rec.turn_id, "t-123");
+            assert_eq!(rec.model, "gpt-5.4");
+            assert_eq!(rec.tokens, Tokens { input: 100, output: 50, cache_read: 10, cache_write: 0, reasoning: 5 });
+        }
+
+        #[test]
+        fn deterministic_turn_id_includes_ts_ms() {
+            // Two turns with identical token counts but different timestamps
+            // must produce different turn_ids — otherwise the dispatch loop
+            // silently merges them.
+            let t = Tokens { input: 100, output: 50, cache_read: 0, cache_write: 0, reasoning: 0 };
+            let a = derive_turn_id("s", "m", &t, 1_000_000);
+            let b = derive_turn_id("s", "m", &t, 1_000_001);
+            assert_ne!(a, b, "ts_ms must contribute to derive_turn_id");
         }
     }
 }
