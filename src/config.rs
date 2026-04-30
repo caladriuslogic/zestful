@@ -191,6 +191,47 @@ fn libc_kill(pid: i32) -> bool {
     }
 }
 
+/// Read the `scraper.enabled` setting. Defaults to `true` when unset
+/// or unreadable. The scraper is on by default.
+pub fn scraper_enabled() -> bool {
+    read_settings_bool("scraper.enabled").unwrap_or(true)
+}
+
+/// Read a boolean from `~/.config/zestful/settings.json` at the given
+/// dotted path (e.g. `"scraper.enabled"`). Returns `None` if the file
+/// is missing, unparseable, or the key is absent.
+fn read_settings_bool(dotted_path: &str) -> Option<bool> {
+    let path = config_dir().join("settings.json");
+    let bytes = std::fs::read(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let mut cur = &v;
+    for segment in dotted_path.split('.') {
+        cur = cur.get(segment)?;
+    }
+    cur.as_bool()
+}
+
+/// Read `scraper.extra_roots` from settings. Each entry is
+/// `{"agent": "claude-code"|"codex", "path": "/some/path"}`.
+/// Returns empty vec when the file/key is missing.
+pub fn scraper_extra_roots() -> Vec<(String, String)> {
+    let path = config_dir().join("settings.json");
+    let bytes = match std::fs::read(&path) { Ok(b) => b, Err(_) => return vec![] };
+    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v, Err(_) => return vec![],
+    };
+    let arr = match v.pointer("/scraper/extra_roots").and_then(|x| x.as_array()) {
+        Some(a) => a, None => return vec![],
+    };
+    arr.iter()
+        .filter_map(|entry| {
+            let agent = entry.get("agent")?.as_str()?.to_string();
+            let path = entry.get("path")?.as_str()?.to_string();
+            Some((agent, path))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
