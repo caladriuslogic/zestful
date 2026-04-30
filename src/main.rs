@@ -4,13 +4,18 @@
 //! the focus daemon (`daemon`). CLI commands are synchronous; the daemon starts
 //! an async tokio/axum runtime for terminal focus switching.
 
-mod cmd;
-mod config;
-mod events;
-pub mod hooks;
-pub mod log;
-mod scraper;
-pub mod workspace;
+use zestful::cmd;
+use zestful::config;
+#[allow(unused_imports)]
+use zestful::events;
+#[allow(unused_imports)]
+use zestful::hooks;
+#[allow(unused_imports)]
+use zestful::log;
+#[allow(unused_imports)]
+use zestful::scraper;
+#[allow(unused_imports)]
+use zestful::workspace;
 
 use clap::{Parser, Subcommand};
 

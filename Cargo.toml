@@ -4,6 +4,14 @@ version = "3.1.0"
 edition = "2021"
 description = "CLI for the Zestful agent notification app"
 
+[lib]
+name = "zestful"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zestful"
+path = "src/main.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 axum = "0.8"
