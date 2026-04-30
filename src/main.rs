@@ -140,9 +140,9 @@ enum Commands {
 
     /// Live agent TUI. Network-only client of the daemon's HTTP+SSE API.
     Top {
-        /// Expand the TUI to fill the full terminal instead of a fixed centered frame.
+        /// Render the TUI as a fixed 120×25 centered frame instead of filling the terminal.
         #[arg(long)]
-        fs: bool,
+        modal: bool,
     },
 
     /// Read the notifications projection from the local event store.
@@ -225,6 +225,6 @@ fn main() -> anyhow::Result<()> {
             json,
         } => cmd::notifications::run(agent, rule, severity, since, json),
 
-        Commands::Top { fs } => cmd::top::run(fs),
+        Commands::Top { modal } => cmd::top::run(modal),
     }
 }
