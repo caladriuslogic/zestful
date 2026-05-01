@@ -16,6 +16,7 @@ pub mod send;
 pub mod severity;
 pub mod notifications;
 pub mod store;
+pub mod summary;
 pub mod tiles;
 
 pub use map::{map_cli_notify, map_hook_payload, map_watch_completed};
