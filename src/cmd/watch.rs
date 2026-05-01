@@ -4,7 +4,6 @@
 //! notification with severity based on success/failure. Auto-captures terminal
 //! URI via the built-in workspace inspector for click-to-focus.
 
-use crate::{cmd::notify, config};
 use anyhow::{bail, Result};
 use std::process::Command;
 
@@ -13,11 +12,6 @@ pub fn run(agent: String, command: Vec<String>) -> Result<()> {
     if command.is_empty() {
         bail!("zestful watch requires a command");
     }
-
-    let token = config::read_token().ok_or_else(|| {
-        anyhow::anyhow!("Zestful app not running or not configured. Token not found.")
-    })?;
-    let port = config::read_port();
 
     // Capture terminal URI before running the command (environment is stable now)
     let terminal_uri = crate::workspace::locate().ok();
@@ -58,16 +52,6 @@ pub fn run(agent: String, command: Vec<String>) -> Result<()> {
             exit_code, severity, agent_name
         ),
     );
-    let _ = notify::send(
-        &token,
-        port,
-        &agent_name,
-        &message,
-        severity,
-        terminal_uri.clone(),
-        false,
-    );
-
     // Emit a structured watch.completed event to the daemon. Best-effort;
     // event-emission failures are logged and swallowed.
     let envelopes = crate::events::map_watch_completed(
