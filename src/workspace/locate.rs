@@ -95,220 +95,113 @@ pub fn locate() -> Result<String> {
 
 /// On Windows, detect which Windows Terminal window/tab the current process is running in.
 ///
-/// Strategy: build the set of all ancestor PIDs for our process, then enumerate every
-/// `PseudoConsoleWindow` owned by each WT frame (`CASCADIA_HOSTING_WINDOW_CLASS`).
-/// Each `PseudoConsoleWindow`'s owner process is the interactive shell for that tab.
-/// If that shell PID appears in our ancestor set we are running inside that tab.
-///
-/// This handles both the ordinary case (shell is a direct WT child) and the Windows 11
-/// "default terminal" (defterm) case where the shell is parented to `explorer.exe` or
-/// another launcher — in both cases WT creates a `PseudoConsoleWindow` whose owner is
-/// always the actual shell, so the ancestor walk finds it correctly.
-/// Only returns `Some` when we are genuinely inside a WT tab.
+/// Strategy: build the set of all ancestor PIDs for our process via a process snapshot,
+/// then enumerate every `PseudoConsoleWindow` owned by each WT frame
+/// (`CASCADIA_HOSTING_WINDOW_CLASS`). If the shell PID for that tab is in our ancestor
+/// set we are running inside it. All Win32 API calls — no PowerShell subprocess.
 #[cfg(target_os = "windows")]
 fn find_windows_terminal() -> Option<(String, Option<u32>)> {
     let our_pid = std::process::id();
-    let script = format!(
-        r#"
-$wtPids = [uint32[]](Get-Process -Name WindowsTerminal -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty Id)
-if ($wtPids.Count -eq 0) {{ exit }}
+    let proc_map = crate::workspace::win32::snapshot_processes();
 
-try {{ Add-Type -TypeDefinition '
-using System;
-using System.Collections.Generic;
-using System.Runtime.InteropServices;
-using System.Text;
-public class ZestfulLocateWT3 {{
-    public delegate bool EWP(IntPtr h, IntPtr l);
-    [DllImport("user32.dll")] public static extern bool EnumWindows(EWP cb, IntPtr l);
-    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
-    [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
-    [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder sb, int n);
-    [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
+    let wt_pids: Vec<u32> = proc_map.iter()
+        .filter(|(_, (_, exe))| exe == "windowsterminal.exe")
+        .map(|(pid, _)| *pid)
+        .collect();
+    if wt_pids.is_empty() {
+        return None;
+    }
 
-    // Find the visible CASCADIA_HOSTING_WINDOW_CLASS frame for a WT pid.
-    public static long FindFrame(uint wtPid) {{
-        long result = 0;
-        EWP cb = (h, l) => {{
-            if (!IsWindowVisible(h)) return true;
-            uint p; GetWindowThreadProcessId(h, out p);
-            if (p != wtPid) return true;
-            var sb = new StringBuilder(64);
-            GetClassName(h, sb, sb.Capacity);
-            if (sb.ToString() != "CASCADIA_HOSTING_WINDOW_CLASS") return true;
-            result = (long)h; return false;
-        }};
-        EnumWindows(cb, IntPtr.Zero);
-        return result;
-    }}
+    let ancestors = win32_ancestor_set(our_pid, &proc_map);
 
-    // Return shell PIDs for all PseudoConsoleWindows parented to frameHwnd.
-    public static List<uint> FindShellPids(long frameHwnd) {{
-        var results = new List<uint>();
-        EnumWindows((h, l) => {{
-            if ((long)GetParent(h) != frameHwnd) return true;
-            var sb = new StringBuilder(64);
-            GetClassName(h, sb, sb.Capacity);
-            if (sb.ToString() != "PseudoConsoleWindow") return true;
-            uint pid; GetWindowThreadProcessId(h, out pid);
-            results.Add(pid);
-            return true;
-        }}, IntPtr.Zero);
-        return results;
-    }}
-}}' }} catch {{ exit }}
-
-# Build a flat process map: pid -> parentPid
-$procMap = @{{}}
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object {{
-    $procMap[[uint32]$_.ProcessId] = [uint32]$_.ParentProcessId
-}}
-
-# Collect all ancestor PIDs of our process (including our own PID).
-$ancestors = [System.Collections.Generic.HashSet[uint32]]::new()
-$cur = [uint32]{our_pid}
-for ($i = 0; $i -lt 20 -and $cur -gt 1; $i++) {{
-    [void]$ancestors.Add($cur)
-    $ppid = $procMap[$cur]
-    if (-not $ppid -or $ppid -eq $cur) {{ break }}
-    $cur = $ppid
-}}
-
-# For each WT process, check if any PseudoConsoleWindow shell is our ancestor.
-foreach ($wtPid in $wtPids) {{
-    $frameHwnd = [ZestfulLocateWT3]::FindFrame($wtPid)
-    if ($frameHwnd -eq 0) {{ continue }}
-    $shellPids = [ZestfulLocateWT3]::FindShellPids($frameHwnd)
-    foreach ($spid in $shellPids) {{
-        if ($ancestors.Contains($spid)) {{
-            [System.Console]::Error.WriteLine("pcw: frame=$frameHwnd shell_pid=$spid")
-            Write-Output "$frameHwnd|$spid"
-            exit
-        }}
-    }}
-}}
-"#,
-        our_pid = our_pid
-    );
-
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .ok()?;
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    for line in stderr.trim().lines() {
-        let line = line.trim();
-        if !line.is_empty() {
-            crate::log::log("wt-locate", line);
+    for wt_pid in wt_pids {
+        let frame = crate::workspace::win32::find_cascadia_frame_for_pid(wt_pid);
+        if frame == 0 {
+            continue;
+        }
+        for shell_pid in crate::workspace::win32::find_pseudo_console_shell_pids(frame) {
+            if ancestors.contains(&shell_pid) {
+                crate::log::log("wt-locate", &format!("pcw: frame={} shell_pid={}", frame, shell_pid));
+                return Some((frame.to_string(), Some(shell_pid)));
+            }
         }
     }
+    None
+}
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout.trim();
-    if line.is_empty() {
-        return None;
+/// Build the set of ancestor PIDs from `start` (inclusive) up to the process root.
+#[cfg(target_os = "windows")]
+fn win32_ancestor_set(
+    start: u32,
+    proc_map: &std::collections::HashMap<u32, (u32, String)>,
+) -> std::collections::HashSet<u32> {
+    let mut set = std::collections::HashSet::new();
+    let mut cur = start;
+    for _ in 0..20 {
+        set.insert(cur);
+        match proc_map.get(&cur) {
+            Some((ppid, _)) if *ppid != 0 && *ppid != cur => cur = *ppid,
+            _ => break,
+        }
     }
-
-    let parts: Vec<&str> = line.splitn(2, '|').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-
-    let hwnd = parts[0].trim().to_string();
-    let shell_pid: u32 = parts[1].trim().parse().unwrap_or(0);
-    let tab_id = if shell_pid != 0 {
-        Some(shell_pid)
-    } else {
-        None
-    };
-
-    crate::log::log(
-        "wt-locate",
-        &format!("result: hwnd={} shell_pid={:?}", hwnd, tab_id),
-    );
-    Some((hwnd, tab_id))
+    set
 }
 
 /// On Windows 10 without Windows Terminal, walk the parent process chain to find a
-/// classic cmd.exe or powershell.exe console host. The PID is used as the window ID,
-/// matching the format produced by cmd::detect() and powershell::detect().
-/// Returns (app_slug, pid_string), e.g. ("cmd", "1234") or ("powershell", "5678").
+/// classic cmd.exe or powershell.exe console host, or an IDE (VS Code family).
+/// Uses a process snapshot — no PowerShell subprocess.
+/// Returns (app_slug, pid_string), e.g. ("cmd", "1234") or ("cursor", "5678").
 #[cfg(target_os = "windows")]
 fn find_classic_console() -> Option<(String, String)> {
-    // Pass our own PID explicitly — do NOT use $PID inside the script, which is the
-    // spawned powershell.exe process and would match itself as "powershell" immediately.
+    const STOP: &[&str] = &["explorer.exe", "wininit.exe", "services.exe", "svchost.exe", "lsass.exe"];
+    const IDES: &[&str] = &["code.exe", "cursor.exe", "windsurf.exe"];
+    const CONSOLES: &[&str] = &["powershell.exe", "pwsh.exe", "cmd.exe"];
+
     let our_pid = std::process::id();
-    // Walk up the process tree and stop at the first IDE process (code.exe,
-    // cursor.exe, windsurf.exe). The inner per-window process is the first
-    // IDE exe encountered walking upward; the outer launcher process is the
-    // second. We want the inner one so each window gets a distinct surface token.
-    let script = format!(
-        r#"
-$stopNames    = @('explorer.exe','wininit.exe','services.exe','svchost.exe','lsass.exe')
-$ideNames     = @('code.exe','cursor.exe','windsurf.exe')
-$consoleNames = @('powershell.exe','pwsh.exe','cmd.exe')
-$procMap = @{{}}
-Get-CimInstance Win32_Process | ForEach-Object {{
-    $procMap[[uint32]$_.ProcessId] = [PSCustomObject]@{{ ppid = [uint32]$_.ParentProcessId; name = $_.Name.ToLower() }}
-}}
-$cur = [uint32]{our_pid}
-$winPid      = $null
-$winName     = $null
-$consolePid  = $null
-$consoleName = $null
-for ($i = 0; $i -lt 30 -and $cur -gt 1; $i++) {{
-    $entry = $procMap[$cur]
-    if (-not $entry) {{ [Console]::Error.WriteLine("cc-walk: pid=$cur not in map, stopping"); break }}
-    [Console]::Error.WriteLine("cc-walk: pid=$cur name=$($entry.name) ppid=$($entry.ppid)")
-    if ($stopNames -contains $entry.name) {{ break }}
-    if ($ideNames -contains $entry.name) {{
-        $winPid  = $cur
-        $winName = $entry.name -replace '\.exe$',''
-        break
-    }}
-    if ($consoleNames -contains $entry.name -and -not $consolePid) {{
-        $consolePid  = $cur
-        $consoleName = if ($entry.name -eq 'cmd.exe') {{ 'cmd' }} else {{ 'powershell' }}
-    }}
-    $cur = $entry.ppid
-}}
-if (-not $winPid -and $consolePid) {{
-    $winPid  = $consolePid
-    $winName = $consoleName
-}}
-[Console]::Error.WriteLine("cc-walk: result name=$winName pid=$winPid")
-if ($winPid) {{ Write-Output "$winName|$winPid" }}
-"#
-    );
+    let proc_map = crate::workspace::win32::snapshot_processes();
 
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .ok()?;
+    let mut cur = our_pid;
+    let mut console_pid: Option<u32> = None;
+    let mut console_name: Option<String> = None;
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    for line in stderr.trim().lines() {
-        let line = line.trim();
-        if !line.is_empty() {
-            crate::log::log("cc-locate", line);
+    for _ in 0..30 {
+        if cur <= 1 {
+            break;
         }
+        let Some((ppid, exe)) = proc_map.get(&cur) else {
+            crate::log::log("cc-locate", &format!("cc-walk: pid={} not in map, stopping", cur));
+            break;
+        };
+        let ppid = *ppid;
+        crate::log::log("cc-locate", &format!("cc-walk: pid={} name={} ppid={}", cur, exe, ppid));
+
+        if STOP.contains(&exe.as_str()) {
+            break;
+        }
+        if IDES.contains(&exe.as_str()) {
+            let name = exe.trim_end_matches(".exe").to_string();
+            crate::log::log("cc-locate", &format!("cc-walk: result name={} pid={}", name, cur));
+            return Some((name, cur.to_string()));
+        }
+        if CONSOLES.contains(&exe.as_str()) && console_pid.is_none() {
+            let name = if exe == "cmd.exe" { "cmd" } else { "powershell" };
+            console_pid = Some(cur);
+            console_name = Some(name.to_string());
+        }
+
+        if ppid == 0 || ppid == cur {
+            break;
+        }
+        cur = ppid;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout.trim();
-    if line.is_empty() {
-        return None;
+    if let (Some(pid), Some(name)) = (console_pid, console_name) {
+        crate::log::log("cc-locate", &format!("cc-walk: result name={} pid={}", name, pid));
+        return Some((name, pid.to_string()));
     }
 
-    let parts: Vec<&str> = line.splitn(2, '|').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-
-    Some((parts[0].trim().to_string(), parts[1].trim().to_string()))
+    crate::log::log("cc-locate", "cc-walk: result name= pid=");
+    None
 }
 
 /// Walk up the process tree from our PID to find a TTY.
