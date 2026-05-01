@@ -1,1 +1,4 @@
 target/
+
+# git worktrees for parallel feature work
+.worktrees/
