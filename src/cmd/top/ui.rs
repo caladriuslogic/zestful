@@ -97,6 +97,61 @@ pub(super) fn format_tokens_short(n: u64) -> String {
     else { format!("{}", n) }
 }
 
+/// One-line "what happened" detail for a recent-event row.
+/// Pulls the most useful per-event-type fields from `payload` and
+/// returns styled spans ready to append to the row Line. Returns
+/// an empty Vec when there's nothing useful beyond the event_type
+/// (e.g. `turn.completed` carries no payload).
+pub(super) fn event_detail_spans(event: &crate::events::store::query::EventRow) -> Vec<Span<'static>> {
+    use crate::events::notifications::rule::Severity;
+    let dim = Style::default().fg(Color::DarkGray);
+    let p = event.payload.as_ref();
+    match event.event_type.as_str() {
+        "tool.completed" => {
+            let tool = p.and_then(|v| v.get("tool_name")).and_then(|v| v.as_str()).unwrap_or("?");
+            let dur = p.and_then(|v| v.get("duration_ms")).and_then(|v| v.as_i64());
+            let mut out = vec![Span::styled(tool.to_string(), Style::default().fg(Color::Cyan))];
+            if let Some(d) = dur {
+                out.push(Span::styled(format!(" · {}ms", d), dim));
+            }
+            out
+        }
+        "turn.metrics" => {
+            let model = p.and_then(|v| v.get("model")).and_then(|v| v.as_str()).unwrap_or("");
+            let tokens = p.and_then(|v| v.get("tokens"));
+            let inp = tokens.and_then(|t| t.get("input")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let outp = tokens.and_then(|t| t.get("output")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let cost = p.and_then(|v| v.get("cost_estimate_usd")).and_then(|v| v.as_f64());
+            let mut out: Vec<Span<'static>> = Vec::new();
+            if !model.is_empty() {
+                out.push(Span::styled(model.to_string(), Style::default().fg(BRAND_ORANGE)));
+                out.push(Span::styled(" · ".to_string(), dim));
+            }
+            out.push(Span::styled(
+                format!("{} in · {} out", format_tokens_short(inp), format_tokens_short(outp)),
+                dim,
+            ));
+            if let Some(c) = cost {
+                out.push(Span::styled(format!(" · ${:.3}", c), dim));
+            }
+            out
+        }
+        "agent.notified" => {
+            let msg = p.and_then(|v| v.get("message")).and_then(|v| v.as_str()).unwrap_or("");
+            if msg.is_empty() {
+                Vec::new()
+            } else {
+                vec![Span::styled(
+                    msg.to_string(),
+                    Style::default().fg(colors::severity_color(&Severity::Warn)),
+                )]
+            }
+        }
+        // turn.completed (empty payload) and unknown types: no extra detail.
+        _ => Vec::new(),
+    }
+}
+
 fn spark7(buckets: &[f64; 7]) -> String {
     const GLYPHS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let max = buckets.iter().cloned().fold(0.0f64, f64::max);
@@ -388,10 +443,16 @@ pub fn draw_detail_pane(f: &mut Frame, area: Rect, state: &AppState) {
     } else {
         for e in state.recent_events.iter().take(max_events) {
             let when = relative_time(e.event_ts, now);
-            lines.push(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(format!("  {:>5}  ", when), Style::default().fg(Color::DarkGray)),
                 Span::raw(e.event_type.clone()),
-            ]));
+            ];
+            let detail = event_detail_spans(e);
+            if !detail.is_empty() {
+                spans.push(Span::styled("  ".to_string(), Style::default().fg(Color::DarkGray)));
+                spans.extend(detail);
+            }
+            lines.push(Line::from(spans));
         }
     }
     lines.push(Line::from(""));
@@ -892,5 +953,87 @@ mod tests {
         s.tiles = vec![t];
         let text = render_to_string(&s);
         assert!(text.contains("$4.27")); // stat band intact
+    }
+
+    fn synth_event(event_type: &str, payload: serde_json::Value) -> crate::events::store::query::EventRow {
+        crate::events::store::query::EventRow {
+            id: 1, received_at: 0, event_id: "e1".into(),
+            event_type: event_type.into(), source: "hook".into(),
+            session_id: Some("s1".into()), project: None,
+            host: "h".into(), os_user: "u".into(), device_id: "d".into(),
+            event_ts: 0, seq: 0, source_pid: 1, schema_version: 1,
+            correlation: None, context: None, payload: Some(payload),
+        }
+    }
+
+    fn span_text(spans: &[Span<'_>]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn event_detail_tool_completed_shows_tool_name_and_duration() {
+        let e = synth_event("tool.completed", serde_json::json!({
+            "tool_name": "Bash", "duration_ms": 79,
+            "result_preview": "long output goes here"
+        }));
+        let spans = event_detail_spans(&e);
+        let text = span_text(&spans);
+        assert!(text.contains("Bash"),  "expected tool name, got: {:?}", text);
+        assert!(text.contains("79ms"),  "expected duration, got: {:?}", text);
+    }
+
+    #[test]
+    fn event_detail_turn_metrics_shows_model_and_token_counts() {
+        let e = synth_event("turn.metrics", serde_json::json!({
+            "model": "claude-opus-4-7",
+            "tokens": { "input": 1500, "output": 200, "cache_read": 0, "cache_write": 0, "reasoning": 0 },
+            "context": { "used_tokens": 1500, "max_tokens": 200000, "ratio": 0.0075 },
+            "cost_estimate_usd": 0.012,
+            "message_count": 1,
+        }));
+        let spans = event_detail_spans(&e);
+        let text = span_text(&spans);
+        assert!(text.contains("claude-opus-4-7"), "expected model, got: {:?}", text);
+        assert!(text.contains("1.5K"),            "expected input tokens, got: {:?}", text);
+        assert!(text.contains("200"),             "expected output tokens, got: {:?}", text);
+        assert!(text.contains("$0.012"),          "expected cost, got: {:?}", text);
+    }
+
+    #[test]
+    fn event_detail_agent_notified_shows_message() {
+        let e = synth_event("agent.notified", serde_json::json!({
+            "kind": "notification",
+            "message": "Claude is waiting for your input",
+        }));
+        let spans = event_detail_spans(&e);
+        let text = span_text(&spans);
+        assert!(text.contains("Claude is waiting for your input"),
+                "expected notification message, got: {:?}", text);
+    }
+
+    #[test]
+    fn event_detail_turn_completed_renders_no_extra_detail() {
+        // turn.completed carries an empty payload — there's nothing
+        // useful to show beyond the event_type itself, so the detail
+        // spans are empty (the row still renders the type + time).
+        let e = synth_event("turn.completed", serde_json::json!({}));
+        let spans = event_detail_spans(&e);
+        assert!(spans.is_empty(), "expected no detail spans, got: {:?}", span_text(&spans));
+    }
+
+    #[test]
+    fn event_detail_unknown_event_type_renders_no_detail() {
+        let e = synth_event("totally.made.up", serde_json::json!({"foo": "bar"}));
+        assert!(event_detail_spans(&e).is_empty());
+    }
+
+    #[test]
+    fn event_detail_tool_completed_handles_missing_fields() {
+        // Defensive: a malformed/legacy event with no payload fields
+        // should still produce a sensible (placeholder) detail.
+        let e = synth_event("tool.completed", serde_json::json!({}));
+        let spans = event_detail_spans(&e);
+        let text = span_text(&spans);
+        assert!(text.contains("?"), "expected '?' placeholder for missing tool_name, got: {:?}", text);
     }
 }
