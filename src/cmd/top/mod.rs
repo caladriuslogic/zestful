@@ -74,7 +74,7 @@ async fn main_loop(term: &mut Terminal<CrosstermBackend<io::Stdout>>, modal: boo
 
     // Channel for background refetch results. The spawned task sends (tiles,
     // notifications, events); the result arm in select! applies them to state.
-    type FetchResult = (Vec<Tile>, Vec<Notification>, Vec<EventRow>);
+    type FetchResult = (Vec<Tile>, Vec<Notification>, Vec<EventRow>, Option<crate::events::summary::Summary>);
     let (fetch_tx, mut fetch_rx) = tokio::sync::mpsc::channel::<FetchResult>(1);
     let mut fetch_pending = false;
 
@@ -167,18 +167,19 @@ async fn main_loop(term: &mut Terminal<CrosstermBackend<io::Stdout>>, modal: boo
             }
 
             // Background refetch completed — apply results to state.
-            Some((tiles, notifs, events)) = fetch_rx.recv() => {
+            Some((tiles, notifs, events, summary)) = fetch_rx.recv() => {
                 fetch_pending = false;
-                state.tiles = tiles;
+                state.update_tiles_and_emit_toasts(tiles);
                 state.notifications = notifs;
                 state.recent_events = events;
+                if summary.is_some() { state.summary = summary; }
                 needs_redraw = true;
             }
 
             _ = tick.tick() => {
                 // Local clock work only — toast expiry, relative-time advancement.
-                if let Some((_, when)) = &state.toast {
-                    if when.elapsed() > Duration::from_secs(3) {
+                if let Some(t) = &state.toast {
+                    if t.since.elapsed() > t.lifetime {
                         state.toast = None;
                         needs_redraw = true;
                     }
@@ -192,11 +193,14 @@ async fn main_loop(term: &mut Terminal<CrosstermBackend<io::Stdout>>, modal: boo
 async fn kickoff_initial_fetch(c: &Client, state: &mut AppState) {
     let since = since_1h();
     match c.tiles(since).await {
-        Ok(t) => state.tiles = t,
+        Ok(t) => state.update_tiles_and_emit_toasts(t),
         Err(e) => state.connection = Connection::Offline(format!("{}", e)),
     }
     if let Ok(n) = c.notifications(since).await {
         state.notifications = n;
+    }
+    if let Ok(s) = c.summary().await {
+        state.summary = Some(s);
     }
 }
 
@@ -207,23 +211,27 @@ async fn fetch_projection(
     c: &Client,
     agent: Option<String>,
     surface: Option<String>,
-) -> (Vec<Tile>, Vec<Notification>, Vec<EventRow>) {
+) -> (Vec<Tile>, Vec<Notification>, Vec<EventRow>, Option<crate::events::summary::Summary>) {
     let since = since_1h();
-    let (t, n) = tokio::join!(c.tiles(since), c.notifications(since));
+    let (t, n, s) = tokio::join!(c.tiles(since), c.notifications(since), c.summary());
     let tiles = t.unwrap_or_default();
     let notifs = n.unwrap_or_default();
+    let summary = s.ok();
     let events = match agent {
         Some(a) => c.events_for_agent(&a, surface.as_deref(), since_1h(), 60).await.unwrap_or_default(),
         None => vec![],
     };
-    (tiles, notifs, events)
+    (tiles, notifs, events, summary)
 }
 
 async fn run_side_effects(c: &Client, state: &mut AppState, fx: Vec<SideEffect>) {
     for f in fx {
         match f {
             SideEffect::RefetchTiles => {
-                if let Ok(t) = c.tiles(since_1h()).await { state.tiles = t; }
+                if let Ok(t) = c.tiles(since_1h()).await {
+                    state.update_tiles_and_emit_toasts(t);
+                }
+                if let Ok(s) = c.summary().await { state.summary = Some(s); }
             }
             SideEffect::RefetchNotifications => {
                 if let Ok(n) = c.notifications(since_1h()).await { state.notifications = n; }

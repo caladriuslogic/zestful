@@ -528,9 +528,11 @@ async fn handle_tiles(
     let since_ms = q.since.unwrap_or(now_ms - 24 * 3_600_000);
     let agent_filter = q.agent;
 
-    let result = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<crate::events::tiles::tile::Tile>> {
         let c = crate::events::store::conn().lock().unwrap();
-        crate::events::tiles::compute(&c, since_ms)
+        let mut tiles = crate::events::tiles::compute(&c, since_ms)?;
+        crate::events::tiles::enrich_with_metrics(&c, &mut tiles, since_ms, now_ms)?;
+        Ok(tiles)
     })
     .await
     .expect("tiles compute task panicked");
@@ -843,6 +845,54 @@ fn validate_envelope(v: &serde_json::Value) -> std::result::Result<(), String> {
     Ok(())
 }
 
+async fn handle_summary(
+    headers: axum::http::HeaderMap,
+) -> impl axum::response::IntoResponse {
+    let expected = config::read_token();
+    let got = headers
+        .get("x-zestful-token")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    match (expected, got) {
+        (Some(e), Some(g)) if e == g => {}
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid token"})),
+            ).into_response();
+        }
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let result = tokio::task::spawn_blocking(move || {
+        let c = crate::events::store::conn().lock().unwrap();
+        crate::events::summary::compute(&c, now_ms)
+    })
+    .await
+    .expect("summary compute task panicked");
+
+    match result {
+        Ok(summary) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "summary": summary,
+                "computed_at": now_ms,
+            })),
+        ).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "summary compute failed",
+                "detail": e.to_string(),
+            })),
+        ).into_response(),
+    }
+}
+
 /// Build the full daemon router. Shared between production startup in
 /// `run_server` and the test `app()` helper so the two can't drift.
 fn build_router() -> Router {
@@ -859,6 +909,7 @@ fn build_router() -> Router {
         )
         .route("/tiles", get(handle_tiles).layer(DefaultBodyLimit::max(16_384)))
         .route("/notifications", get(handle_notifications).layer(DefaultBodyLimit::max(16_384)))
+        .route("/summary", get(handle_summary).layer(DefaultBodyLimit::max(16_384)))
         .route("/stream", get(handle_stream))
         .route("/log", post(handle_log).layer(DefaultBodyLimit::max(64 * 1024)))
 }
@@ -1961,5 +2012,39 @@ mod tests {
             "expected stack trace content preserved on the same line; got: {}",
             zestful_lines[0]
         );
+    }
+
+    #[tokio::test]
+    async fn summary_returns_default_on_empty_store() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token-summary");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/summary")
+            .header("x-zestful-token", "test-token-summary")
+            .body(Body::empty()).unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 16_384).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["summary"]["today_cost_usd"], 0.0);
+        assert_eq!(v["summary"]["today_tokens"], 0);
+        assert_eq!(v["summary"]["agents"], 0);
+        assert_eq!(v["summary"]["sessions"], 0);
+        assert_eq!(v["summary"]["cost_sparkline"].as_array().unwrap().len(), 7);
+    }
+
+    #[tokio::test]
+    async fn summary_403s_without_token() {
+        let _home = HomeGuard::new();
+        set_test_token("test-token-summary-noauth");
+        let req = Request::builder()
+            .method("GET")
+            .uri("/summary")
+            .body(Body::empty()).unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }

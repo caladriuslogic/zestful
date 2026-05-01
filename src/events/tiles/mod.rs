@@ -102,6 +102,176 @@ pub(crate) fn walk_and_derive(rows: &[EventRow]) -> Vec<derive::DerivedRow> {
     out
 }
 
+/// Post-pass: for each tile, find its "active session" (the most recent
+/// turn.metrics event whose session_id maps to the tile via the most
+/// recent surface-attributed event for that session_id) and attach
+/// aggregated metrics. Tiles whose active session has no turn.metrics
+/// remain `metrics: None`.
+///
+/// `now_ms` is passed in (rather than read from the clock) so the
+/// burn_rate calculation is deterministic in tests.
+pub fn enrich_with_metrics(
+    conn: &Connection,
+    tiles: &mut [tile::Tile],
+    since_ms: i64,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    use crate::events::payload::TurnTokens;
+    use std::collections::HashMap;
+
+    // 1) Build session_id → tile_id map by running each event through
+    // the same `derive::derive` logic compute() uses. This keeps a
+    // single source of truth for what (agent, project_anchor,
+    // surface_token) an event maps to — events emit fields like
+    // `application_instance` / `subapplication`, not a literal
+    // `surface_token`, so reading ctx["surface_token"] would silently
+    // fail to attribute any real-world event to a tile.
+    //
+    // Iterating ASC by received_at means later attributions overwrite
+    // earlier ones, so the most-recent surface event per session_id
+    // wins.
+    let rows = fetch_since(conn, since_ms)?;
+    let mut active_views = derive::VscodeAttribution::new();
+    let mut recent_focus = derive::VscodeRecentFocus::default();
+    let mut session_to_tile: HashMap<String, String> = HashMap::new();
+    for row in &rows {
+        if let Some((window_pid, view, visible)) = derive::parse_view_visible_change(row) {
+            if visible {
+                active_views.insert(window_pid, view);
+            } else {
+                active_views.remove(&window_pid);
+            }
+        }
+        if let Some((window_pid, workspace_root, ts_ms)) = derive::parse_vscode_focus_signal(row) {
+            recent_focus = derive::VscodeRecentFocus {
+                ts_ms: Some(ts_ms),
+                window_pid: Some(window_pid),
+                workspace_root: Some(workspace_root),
+            };
+        }
+        // turn.metrics rows carry no surface signal — they're the
+        // payload we're trying to attach; skip them in the join pass.
+        if row.event_type == "turn.metrics" { continue; }
+        let Some(sid) = row.session_id.as_deref() else { continue; };
+        let Some(d) = derive::derive(row, &active_views, &recent_focus) else { continue; };
+        let tid = tile::id_for(&d.agent, &d.project_anchor, &d.surface_token);
+        session_to_tile.insert(sid.to_string(), tid);
+    }
+
+    // 2) Aggregate turn.metrics per session.
+    struct Agg {
+        last_ts: i64,
+        last_ratio: Option<f64>,
+        last_used_tokens: u64,
+        last_max_tokens: Option<u64>,
+        last_model: String,
+        cost_total: f64,
+        cost_total_known: bool,
+        cost_last_60min: f64,
+        tokens_in: u64, tokens_out: u64,
+        tokens_cache_read: u64, tokens_cache_write: u64, tokens_reasoning: u64,
+        first_ts: i64,
+    }
+    let mut per_session: HashMap<String, Agg> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT session_id, event_ts, payload
+         FROM events
+         WHERE event_type = 'turn.metrics'
+           AND event_ts >= ? AND session_id IS NOT NULL"
+    )?;
+    let rows = stmt.query_map([since_ms], |row| {
+        let s: String = row.get(0)?;
+        let ts: i64 = row.get(1)?;
+        let p: Option<String> = row.get(2)?;
+        Ok((s, ts, p))
+    })?;
+    for r in rows {
+        let (sid, ts, payload_str) = r?;
+        let p: serde_json::Value = match payload_str.and_then(|s| serde_json::from_str(&s).ok()) {
+            Some(v) => v, None => continue,
+        };
+        let entry = per_session.entry(sid).or_insert(Agg {
+            last_ts: 0, last_ratio: None,
+            last_used_tokens: 0, last_max_tokens: None,
+            last_model: String::new(),
+            cost_total: 0.0, cost_total_known: true, cost_last_60min: 0.0,
+            tokens_in: 0, tokens_out: 0,
+            tokens_cache_read: 0, tokens_cache_write: 0, tokens_reasoning: 0,
+            first_ts: i64::MAX,
+        });
+        if ts < entry.first_ts { entry.first_ts = ts; }
+        if ts >= entry.last_ts {
+            entry.last_ts = ts;
+            let ctx = p.get("context");
+            entry.last_ratio = ctx.and_then(|c| c.get("ratio")).and_then(|v| v.as_f64());
+            entry.last_used_tokens = ctx.and_then(|c| c.get("used_tokens"))
+                                        .and_then(|v| v.as_u64()).unwrap_or(0);
+            entry.last_max_tokens = ctx.and_then(|c| c.get("max_tokens"))
+                                       .and_then(|v| v.as_u64());
+            entry.last_model = p.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        }
+        match p.get("cost_estimate_usd").and_then(|v| v.as_f64()) {
+            Some(c) => {
+                entry.cost_total += c;
+                if ts >= now_ms - 3_600_000 { entry.cost_last_60min += c; }
+            }
+            None => entry.cost_total_known = false,
+        }
+        if let Some(t) = p.get("tokens").and_then(|v| v.as_object()) {
+            entry.tokens_in           += t.get("input")      .and_then(|v| v.as_u64()).unwrap_or(0);
+            entry.tokens_out          += t.get("output")     .and_then(|v| v.as_u64()).unwrap_or(0);
+            entry.tokens_cache_read   += t.get("cache_read") .and_then(|v| v.as_u64()).unwrap_or(0);
+            entry.tokens_cache_write  += t.get("cache_write").and_then(|v| v.as_u64()).unwrap_or(0);
+            entry.tokens_reasoning    += t.get("reasoning")  .and_then(|v| v.as_u64()).unwrap_or(0);
+        }
+    }
+    drop(stmt);
+
+    // 3) For each tile, pick the most-recent session attached and attach metrics.
+    let mut tile_to_session: HashMap<String, (String, i64)> = HashMap::new();
+    for (sid, tile_id) in &session_to_tile {
+        let Some(agg) = per_session.get(sid) else { continue; };
+        tile_to_session.entry(tile_id.clone())
+            .and_modify(|slot| {
+                if agg.last_ts > slot.1 { *slot = (sid.clone(), agg.last_ts); }
+            })
+            .or_insert((sid.clone(), agg.last_ts));
+    }
+
+    for tile in tiles.iter_mut() {
+        let Some((sid, _)) = tile_to_session.get(&tile.id) else { continue; };
+        let Some(agg) = per_session.get(sid) else { continue; };
+        let session_cost_usd = if agg.cost_total_known { Some(agg.cost_total) } else { None };
+        let cache_hit_denom = agg.tokens_in + agg.tokens_cache_read;
+        let cache_hit_pct = if cache_hit_denom > 0 {
+            Some(agg.tokens_cache_read as f64 / cache_hit_denom as f64)
+        } else { None };
+        let elapsed_min = ((now_ms - agg.first_ts).max(0) / 60_000).max(1) as f64;
+        let burn_rate = if agg.cost_last_60min > 0.0 {
+            Some(agg.cost_last_60min / elapsed_min.min(60.0) * 60.0)
+        } else { None };
+        tile.metrics = Some(tile::TileMetrics {
+            model: agg.last_model.clone(),
+            session_id: sid.clone(),
+            context_pct: agg.last_ratio,
+            context_used_tokens: agg.last_used_tokens,
+            context_max_tokens: agg.last_max_tokens,
+            session_cost_usd,
+            cache_hit_pct,
+            burn_rate_usd_hr: burn_rate,
+            tokens: TurnTokens {
+                input: agg.tokens_in,
+                output: agg.tokens_out,
+                cache_read: agg.tokens_cache_read,
+                cache_write: agg.tokens_cache_write,
+                reasoning: agg.tokens_reasoning,
+            },
+        });
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +412,194 @@ mod tests {
         assert_eq!(codex_rows[1].project_anchor, "<codex-app>");       // standalone
     }
 
+    // Helper for enrich tests: build a Tile directly so we test enrich
+    // in isolation from the compute() derivation pipeline (which has its
+    // own coverage).
+    fn synth_tile(agent: &str, surface_token: &str) -> crate::events::tiles::tile::Tile {
+        use crate::events::tiles::tile::{Tile, id_for};
+        Tile {
+            id: id_for(agent, "/x/zestful", surface_token),
+            agent: agent.to_string(),
+            project_anchor: Some("/x/zestful".to_string()),
+            project_label: Some("zestful".to_string()),
+            surface_kind: "cli".to_string(),
+            surface_token: surface_token.to_string(),
+            surface_label: surface_token.to_string(),
+            first_seen_at: 0, last_seen_at: 0,
+            event_count: 0, latest_event_type: "x".into(),
+            focus_uri: None, metrics: None,
+        }
+    }
+
+    #[test]
+    fn enrich_attaches_metrics_when_session_has_surface_attributed_event() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::events::store::schema::run_migrations(&conn).unwrap();
+
+        let now = 1_761_830_000_000i64;
+
+        // 1. Surface-attributed event maps session → tile.
+        conn.execute(
+            "INSERT INTO events (
+                received_at, event_id, schema_version, event_ts, seq,
+                host, os_user, device_id, source, source_pid,
+                event_type, session_id, project, correlation, context, payload
+            ) VALUES (?,?,1,?,0,'h','u','d','hook',1,
+                      'turn.completed',?,'/x/zestful',?,?,?)",
+            rusqlite::params![
+                now - 5000, "h1", now - 5000, "s1",
+                json!({ "session_id": "s1" }).to_string(),
+                json!({
+                    "agent": "claude-code",
+                    "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" },
+                    "cwd": "/x/zestful"
+                }).to_string(),
+                json!({}).to_string(),
+            ],
+        ).unwrap();
+
+        // 2. turn.metrics for the same session.
+        conn.execute(
+            "INSERT INTO events (
+                received_at, event_id, schema_version, event_ts, seq,
+                host, os_user, device_id, source, source_pid,
+                event_type, session_id, project, correlation, context, payload
+            ) VALUES (?,?,1,?,0,'h','u','d','agent-scraper',1,
+                      'turn.metrics',?,NULL,?,?,?)",
+            rusqlite::params![
+                now - 1000, "m1", now - 1000, "s1",
+                json!({ "session_id": "s1" }).to_string(),
+                json!({ "agent": "claude-code", "model": "claude-3-5-sonnet-20241022" }).to_string(),
+                json!({
+                    "model": "claude-3-5-sonnet-20241022",
+                    "tokens": { "input": 1000, "output": 200, "cache_read": 500,
+                                "cache_write": 0, "reasoning": 0 },
+                    "context": { "used_tokens": 1000, "max_tokens": 200000, "ratio": 0.005 },
+                    "cost_estimate_usd": 0.10,
+                    "message_count": 1
+                }).to_string(),
+            ],
+        ).unwrap();
+
+        let mut tiles = vec![synth_tile("claude-code", "tmux:z/pane:%0")];
+        enrich_with_metrics(&conn, &mut tiles, now - 24 * 3_600_000, now).unwrap();
+
+        let m = tiles[0].metrics.as_ref().expect("metrics attached");
+        assert_eq!(m.session_id, "s1");
+        assert_eq!(m.model, "claude-3-5-sonnet-20241022");
+        assert!((m.context_pct.unwrap() - 0.005).abs() < 1e-9);
+        assert_eq!(m.context_used_tokens, 1000);
+        assert_eq!(m.context_max_tokens, Some(200_000));
+        assert!((m.session_cost_usd.unwrap() - 0.10).abs() < 1e-9);
+        assert!((m.cache_hit_pct.unwrap() - (500.0 / 1500.0)).abs() < 1e-9);
+        assert_eq!(m.tokens.input, 1000);
+    }
+
+    #[test]
+    fn enrich_leaves_metrics_none_when_session_has_no_surface_event() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::events::store::schema::run_migrations(&conn).unwrap();
+
+        let now = 1_761_830_000_000i64;
+        conn.execute(
+            "INSERT INTO events (
+                received_at, event_id, schema_version, event_ts, seq,
+                host, os_user, device_id, source, source_pid,
+                event_type, session_id, project, correlation, context, payload
+            ) VALUES (?,?,1,?,0,'h','u','d','agent-scraper',1,
+                      'turn.metrics',?,NULL,?,?,?)",
+            rusqlite::params![
+                now - 1000, "m1", now - 1000, "s_orphan",
+                json!({ "session_id": "s_orphan" }).to_string(),
+                json!({ "agent": "claude-code", "model": "claude-3-5-sonnet-20241022" }).to_string(),
+                json!({
+                    "model": "claude-3-5-sonnet-20241022",
+                    "tokens": { "input": 100, "output": 0, "cache_read": 0,
+                                "cache_write": 0, "reasoning": 0 },
+                    "context": { "used_tokens": 100, "max_tokens": 200000, "ratio": 0.0005 },
+                    "cost_estimate_usd": 0.01,
+                    "message_count": 1
+                }).to_string(),
+            ],
+        ).unwrap();
+
+        let mut tiles = vec![synth_tile("claude-code", "tmux:z/pane:%0")];
+        enrich_with_metrics(&conn, &mut tiles, now - 24 * 3_600_000, now).unwrap();
+        assert!(tiles[0].metrics.is_none(),
+                "expected metrics: None when no surface event maps the session");
+    }
+
+    #[test]
+    fn enrich_attaches_metrics_for_realistic_cli_event_without_literal_surface_token_field() {
+        // Production events from the CLI hook do NOT carry a literal
+        // `context.surface_token` field — they emit `application` /
+        // `application_instance` / `subapplication`, and the tile
+        // projection derives `surface_token` from those via
+        // `derive::derive`. enrich_with_metrics must use the SAME
+        // derivation so the session→tile join works on real data.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::events::store::schema::run_migrations(&conn).unwrap();
+
+        let now = 1_761_830_000_000i64;
+
+        // Surface-attributed event with the shape real Claude Code hook
+        // events have: application_instance + cwd, no surface_token.
+        conn.execute(
+            "INSERT INTO events (
+                received_at, event_id, schema_version, event_ts, seq,
+                host, os_user, device_id, source, source_pid,
+                event_type, session_id, project, correlation, context, payload
+            ) VALUES (?,?,1,?,0,'h','u','d','hook',1,
+                      'tool.completed',?,'/x/zestful',?,?,?)",
+            rusqlite::params![
+                now - 5000, "h1", now - 5000, "s1",
+                json!({ "session_id": "s1" }).to_string(),
+                json!({
+                    "agent": "claude-code",
+                    "application": "tmux:0",
+                    "application_instance": "window:0",
+                    "cwd": "/x/zestful"
+                }).to_string(),
+                json!({}).to_string(),
+            ],
+        ).unwrap();
+
+        // turn.metrics for the same session — context shape mirrors
+        // what scraper/emit.rs actually emits (no surface info).
+        conn.execute(
+            "INSERT INTO events (
+                received_at, event_id, schema_version, event_ts, seq,
+                host, os_user, device_id, source, source_pid,
+                event_type, session_id, project, correlation, context, payload
+            ) VALUES (?,?,1,?,0,'h','u','d','agent-scraper',1,
+                      'turn.metrics',?,NULL,?,?,?)",
+            rusqlite::params![
+                now - 1000, "m1", now - 1000, "s1",
+                json!({ "session_id": "s1" }).to_string(),
+                json!({ "agent": "claude-code", "model": "claude-opus-4-7" }).to_string(),
+                json!({
+                    "model": "claude-opus-4-7",
+                    "tokens": { "input": 1000, "output": 200, "cache_read": 500,
+                                "cache_write": 0, "reasoning": 0 },
+                    "context": { "used_tokens": 1000, "max_tokens": 200000, "ratio": 0.005 },
+                    "cost_estimate_usd": 0.10,
+                    "message_count": 1
+                }).to_string(),
+            ],
+        ).unwrap();
+
+        // Tile that compute() would produce for this stream:
+        // (agent, project_anchor, surface_token) = ("claude-code", "/x/zestful", "window:0").
+        let mut tiles = vec![synth_tile("claude-code", "window:0")];
+        enrich_with_metrics(&conn, &mut tiles, now - 24 * 3_600_000, now).unwrap();
+
+        let m = tiles[0].metrics.as_ref()
+            .expect("metrics should attach when surface_token derives from application_instance");
+        assert_eq!(m.session_id, "s1");
+        assert_eq!(m.model, "claude-opus-4-7");
+        assert_eq!(m.context_used_tokens, 1000);
+    }
+
     #[test]
     fn walk_and_derive_two_windows_have_independent_map_state() {
         // W1 has view A visible; W2 has view B visible.
@@ -269,5 +627,215 @@ mod tests {
         assert_eq!(agent_at(3000), Some("vscode+view-A"));
         assert_eq!(agent_at(4000), Some("vscode+view-B"));
         assert_eq!(agent_at(7000), Some("vscode+view-B"));
+    }
+
+    #[test]
+    fn enrich_sums_costs_and_tokens_across_multiple_metrics_in_one_session() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::events::store::schema::run_migrations(&conn).unwrap();
+
+        let now = 1_761_830_000_000i64;
+
+        // Surface event maps s1 → tile.
+        conn.execute(
+            "INSERT INTO events (received_at, event_id, schema_version, event_ts, seq,
+                host, os_user, device_id, source, source_pid,
+                event_type, session_id, project, correlation, context, payload
+            ) VALUES (?,?,1,?,0,'h','u','d','hook',1,
+                      'turn.completed',?,'/x/zestful',?,?,?)",
+            rusqlite::params![
+                now - 5000, "h1", now - 5000, "s1",
+                json!({ "session_id": "s1" }).to_string(),
+                json!({
+                    "agent": "claude-code",
+                    "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" },
+                    "cwd": "/x/zestful"
+                }).to_string(),
+                json!({}).to_string(),
+            ],
+        ).unwrap();
+
+        // Two turn.metrics for s1 — different ts so the latest is identifiable.
+        let metric = |id: &str, ts: i64, input: u64, output: u64, cache: u64, cost: f64, ratio: f64| {
+            conn.execute(
+                "INSERT INTO events (received_at, event_id, schema_version, event_ts, seq,
+                    host, os_user, device_id, source, source_pid,
+                    event_type, session_id, project, correlation, context, payload
+                ) VALUES (?,?,1,?,0,'h','u','d','agent-scraper',1,
+                          'turn.metrics',?,NULL,?,?,?)",
+                rusqlite::params![
+                    ts, id, ts, "s1",
+                    json!({ "session_id": "s1" }).to_string(),
+                    json!({ "agent": "claude-code", "model": "claude-3-5-sonnet-20241022" }).to_string(),
+                    json!({
+                        "model": "claude-3-5-sonnet-20241022",
+                        "tokens": { "input": input, "output": output, "cache_read": cache,
+                                    "cache_write": 0, "reasoning": 0 },
+                        "context": { "used_tokens": input, "max_tokens": 200000, "ratio": ratio },
+                        "cost_estimate_usd": cost,
+                        "message_count": 1
+                    }).to_string(),
+                ],
+            ).unwrap();
+        };
+        metric("m1", now - 3000, 100, 20, 50, 0.05, 0.001);
+        metric("m2", now - 1000, 200, 40, 80, 0.10, 0.005);  // most recent
+
+        let mut tiles = vec![synth_tile("claude-code", "tmux:z/pane:%0")];
+        enrich_with_metrics(&conn, &mut tiles, now - 24 * 3_600_000, now).unwrap();
+
+        let m = tiles[0].metrics.as_ref().expect("metrics attached");
+        // Sums across both metrics:
+        assert!((m.session_cost_usd.unwrap() - 0.15).abs() < 1e-9);
+        assert_eq!(m.tokens.input, 300);
+        assert_eq!(m.tokens.output, 60);
+        assert_eq!(m.tokens.cache_read, 130);
+        // Last-wins for the snapshot fields:
+        assert!((m.context_pct.unwrap() - 0.005).abs() < 1e-9);
+        assert_eq!(m.context_used_tokens, 200);
+    }
+
+    #[test]
+    fn enrich_marks_session_cost_none_when_any_metric_has_null_cost() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::events::store::schema::run_migrations(&conn).unwrap();
+
+        let now = 1_761_830_000_000i64;
+
+        conn.execute(
+            "INSERT INTO events (received_at, event_id, schema_version, event_ts, seq,
+                host, os_user, device_id, source, source_pid,
+                event_type, session_id, project, correlation, context, payload
+            ) VALUES (?,?,1,?,0,'h','u','d','hook',1,
+                      'turn.completed',?,'/x/zestful',?,?,?)",
+            rusqlite::params![
+                now - 5000, "h1", now - 5000, "s1",
+                json!({ "session_id": "s1" }).to_string(),
+                json!({
+                    "agent": "claude-code",
+                    "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" },
+                    "cwd": "/x/zestful"
+                }).to_string(),
+                json!({}).to_string(),
+            ],
+        ).unwrap();
+
+        // First metric has cost; second has null cost (unknown model).
+        conn.execute(
+            "INSERT INTO events (received_at, event_id, schema_version, event_ts, seq,
+                host, os_user, device_id, source, source_pid,
+                event_type, session_id, project, correlation, context, payload
+            ) VALUES (?,?,1,?,0,'h','u','d','agent-scraper',1,
+                      'turn.metrics',?,NULL,?,?,?)",
+            rusqlite::params![
+                now - 3000, "m1", now - 3000, "s1",
+                json!({ "session_id": "s1" }).to_string(),
+                json!({ "agent": "claude-code", "model": "claude-3-5-sonnet-20241022" }).to_string(),
+                json!({
+                    "model": "claude-3-5-sonnet-20241022",
+                    "tokens": { "input": 100, "output": 20, "cache_read": 0,
+                                "cache_write": 0, "reasoning": 0 },
+                    "context": { "used_tokens": 100, "max_tokens": 200000, "ratio": 0.0005 },
+                    "cost_estimate_usd": 0.05,
+                    "message_count": 1
+                }).to_string(),
+            ],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO events (received_at, event_id, schema_version, event_ts, seq,
+                host, os_user, device_id, source, source_pid,
+                event_type, session_id, project, correlation, context, payload
+            ) VALUES (?,?,1,?,0,'h','u','d','agent-scraper',1,
+                      'turn.metrics',?,NULL,?,?,?)",
+            rusqlite::params![
+                now - 1000, "m2", now - 1000, "s1",
+                json!({ "session_id": "s1" }).to_string(),
+                json!({ "agent": "claude-code", "model": "totally-made-up" }).to_string(),
+                json!({
+                    "model": "totally-made-up",
+                    "tokens": { "input": 50, "output": 10, "cache_read": 0,
+                                "cache_write": 0, "reasoning": 0 },
+                    "context": { "used_tokens": 50, "max_tokens": null, "ratio": null },
+                    "cost_estimate_usd": null,
+                    "message_count": 1
+                }).to_string(),
+            ],
+        ).unwrap();
+
+        let mut tiles = vec![synth_tile("claude-code", "tmux:z/pane:%0")];
+        enrich_with_metrics(&conn, &mut tiles, now - 24 * 3_600_000, now).unwrap();
+
+        let m = tiles[0].metrics.as_ref().expect("metrics attached");
+        // Strict cost semantics: any null cost → None for the whole session.
+        assert!(m.session_cost_usd.is_none(),
+                "expected None when any turn.metrics has null cost; got {:?}", m.session_cost_usd);
+        // Tokens still aggregate normally:
+        assert_eq!(m.tokens.input, 150);
+        assert_eq!(m.tokens.output, 30);
+    }
+
+    #[test]
+    fn enrich_picks_most_recent_session_when_tile_has_multiple_sessions() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::events::store::schema::run_migrations(&conn).unwrap();
+
+        let now = 1_761_830_000_000i64;
+
+        let surface = |id: &str, ts: i64, sid: &str| {
+            conn.execute(
+                "INSERT INTO events (received_at, event_id, schema_version, event_ts, seq,
+                    host, os_user, device_id, source, source_pid,
+                    event_type, session_id, project, correlation, context, payload
+                ) VALUES (?,?,1,?,0,'h','u','d','hook',1,
+                          'turn.completed',?,'/x/zestful',?,?,?)",
+                rusqlite::params![
+                    ts, id, ts, sid,
+                    json!({ "session_id": sid }).to_string(),
+                    json!({
+                    "agent": "claude-code",
+                    "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" },
+                    "cwd": "/x/zestful"
+                }).to_string(),
+                    json!({}).to_string(),
+                ],
+            ).unwrap();
+        };
+        let metric = |id: &str, ts: i64, sid: &str, ratio: f64, cost: f64| {
+            conn.execute(
+                "INSERT INTO events (received_at, event_id, schema_version, event_ts, seq,
+                    host, os_user, device_id, source, source_pid,
+                    event_type, session_id, project, correlation, context, payload
+                ) VALUES (?,?,1,?,0,'h','u','d','agent-scraper',1,
+                          'turn.metrics',?,NULL,?,?,?)",
+                rusqlite::params![
+                    ts, id, ts, sid,
+                    json!({ "session_id": sid }).to_string(),
+                    json!({ "agent": "claude-code", "model": "claude-3-5-sonnet-20241022" }).to_string(),
+                    json!({
+                        "model": "claude-3-5-sonnet-20241022",
+                        "tokens": { "input": 100, "output": 0, "cache_read": 0,
+                                    "cache_write": 0, "reasoning": 0 },
+                        "context": { "used_tokens": 100, "max_tokens": 200000, "ratio": ratio },
+                        "cost_estimate_usd": cost,
+                        "message_count": 1
+                    }).to_string(),
+                ],
+            ).unwrap();
+        };
+
+        // Two sessions on same tile: s_old (older) and s_new (newer).
+        surface("h_old", now - 10_000, "s_old");
+        metric("m_old", now - 9_000, "s_old", 0.20, 0.50);
+        surface("h_new", now - 3_000, "s_new");
+        metric("m_new", now - 2_000, "s_new", 0.80, 0.10);  // most recent
+
+        let mut tiles = vec![synth_tile("claude-code", "tmux:z/pane:%0")];
+        enrich_with_metrics(&conn, &mut tiles, now - 24 * 3_600_000, now).unwrap();
+
+        let m = tiles[0].metrics.as_ref().expect("metrics attached");
+        assert_eq!(m.session_id, "s_new", "expected most-recent session to win");
+        assert!((m.context_pct.unwrap() - 0.80).abs() < 1e-9);
+        // session_cost is for s_new only (not s_old).
+        assert!((m.session_cost_usd.unwrap() - 0.10).abs() < 1e-9);
     }
 }

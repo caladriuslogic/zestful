@@ -63,7 +63,7 @@ pub const HELP: &[HelpRow] = &[
     HelpRow { section: "Actions",    keys: "?",             description: "toggle this help overlay" },
     HelpRow { section: "Actions",    keys: "q / Ctrl-C",    description: "quit" },
 
-    HelpRow { section: "Display",    keys: "s",             description: "cycle sort: last_seen↓, event_count↓, agent↑" },
+    HelpRow { section: "Display",    keys: "s",             description: "cycle sort: last_seen↓, event_count↓, agent↑, ctx%↓, $↓" },
     HelpRow { section: "Display",    keys: "N",             description: "toggle 'only tiles with notifications'" },
 ];
 

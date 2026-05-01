@@ -1,7 +1,7 @@
 //! ratatui rendering. Pure functions over `&AppState`.
 
 use crate::cmd::top::app::{AppState, Connection, Pane};
-use crate::cmd::top::colors::{self, BRAND_ORANGE, BRAND_ORANGE_LIGHT};
+use crate::cmd::top::colors::{self, BRAND_ORANGE};
 use crate::cmd::top::keys::InputMode;
 use ratatui::{
     Frame,
@@ -27,13 +27,13 @@ pub fn draw(f: &mut Frame, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),    // header
+            Constraint::Length(3),    // stat band
             Constraint::Min(1),       // body
             Constraint::Length(1),    // status bar
         ])
         .split(area);
 
-    draw_header(f, chunks[0], state);
+    draw_stat_band(f, chunks[0], state);
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -45,17 +45,124 @@ pub fn draw(f: &mut Frame, state: &AppState) {
     draw_help_overlay(f, state);
 }
 
-pub fn draw_header(f: &mut Frame, area: Rect, _state: &AppState) {
-    // Brand mark: ▌Z▐ where Z has orange bg + black bold fg, flanked by
-    // gradient-stop accent half-blocks.
-    let brand = Line::from(vec![
-        Span::styled("▌", Style::default().fg(BRAND_ORANGE_LIGHT)),
-        Span::styled("Z", Style::default().bg(BRAND_ORANGE).fg(Color::Black).add_modifier(Modifier::BOLD)),
-        Span::styled("▐", Style::default().fg(BRAND_ORANGE_LIGHT)),
+pub fn draw_stat_band(f: &mut Frame, area: Rect, state: &AppState) {
+    use ratatui::widgets::{Block, Borders, Paragraph};
+    use ratatui::style::{Style, Color, Modifier};
+    use ratatui::text::{Line, Span};
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" ZESTFUL TOP ",
+            Style::default().fg(BRAND_ORANGE).add_modifier(Modifier::BOLD)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let cost = state.summary.as_ref().map(|s| format!("${:.2} today", s.today_cost_usd))
+                                     .unwrap_or_else(|| "$— today".to_string());
+    let toks = state.summary.as_ref().map(|s| format_tokens(s.today_tokens))
+                                     .unwrap_or_else(|| "— tokens".to_string());
+    let counts = match state.summary.as_ref() {
+        Some(s) => format!("{} agents · {} sessions", s.agents, s.sessions),
+        None    => "— agents · — sessions".to_string(),
+    };
+    let spark = state.summary.as_ref().map(|s| spark7(&s.cost_sparkline))
+                                      .unwrap_or_else(|| "       ".to_string());
+
+    let line = Line::from(vec![
+        Span::styled(" Z ", Style::default()
+            .bg(BRAND_ORANGE)
+            .fg(Color::Black).add_modifier(Modifier::BOLD)),
         Span::raw("  "),
-        Span::styled("zestful top", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(cost),
+        Span::raw("   ·   "),
+        Span::raw(toks),
+        Span::raw("   ·   "),
+        Span::raw(counts),
+        Span::raw("   ·   "),
+        Span::styled(spark, Style::default().fg(Color::Rgb(0x67, 0xE8, 0xF9))),
+        Span::raw("  cost (24h)"),
     ]);
-    f.render_widget(Paragraph::new(brand), area);
+    f.render_widget(Paragraph::new(line), inner);
+}
+
+fn format_tokens(n: u64) -> String {
+    format!("{} tokens", format_tokens_short(n))
+}
+
+/// Number-only formatter, for inline use where "tokens" is implied by
+/// surrounding context (e.g. "in 12.4K · out 832").
+pub(super) fn format_tokens_short(n: u64) -> String {
+    if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1_000_000.0) }
+    else if n >= 1_000 { format!("{:.1}K", n as f64 / 1_000.0) }
+    else { format!("{}", n) }
+}
+
+/// One-line "what happened" detail for a recent-event row.
+/// Pulls the most useful per-event-type fields from `payload` and
+/// returns styled spans ready to append to the row Line. Returns
+/// an empty Vec when there's nothing useful beyond the event_type
+/// (e.g. `turn.completed` carries no payload).
+pub(super) fn event_detail_spans(event: &crate::events::store::query::EventRow) -> Vec<Span<'static>> {
+    use crate::events::notifications::rule::Severity;
+    let dim = Style::default().fg(Color::DarkGray);
+    let p = event.payload.as_ref();
+    match event.event_type.as_str() {
+        "tool.completed" => {
+            let tool = p.and_then(|v| v.get("tool_name")).and_then(|v| v.as_str()).unwrap_or("?");
+            let dur = p.and_then(|v| v.get("duration_ms")).and_then(|v| v.as_i64());
+            let mut out = vec![Span::styled(tool.to_string(), Style::default().fg(Color::Cyan))];
+            if let Some(d) = dur {
+                out.push(Span::styled(format!(" · {}ms", d), dim));
+            }
+            out
+        }
+        "turn.metrics" => {
+            let model = p.and_then(|v| v.get("model")).and_then(|v| v.as_str()).unwrap_or("");
+            let tokens = p.and_then(|v| v.get("tokens"));
+            let inp = tokens.and_then(|t| t.get("input")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let outp = tokens.and_then(|t| t.get("output")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let cost = p.and_then(|v| v.get("cost_estimate_usd")).and_then(|v| v.as_f64());
+            let mut out: Vec<Span<'static>> = Vec::new();
+            if !model.is_empty() {
+                out.push(Span::styled(model.to_string(), Style::default().fg(BRAND_ORANGE)));
+                out.push(Span::styled(" · ".to_string(), dim));
+            }
+            out.push(Span::styled(
+                format!("{} in · {} out", format_tokens_short(inp), format_tokens_short(outp)),
+                dim,
+            ));
+            if let Some(c) = cost {
+                out.push(Span::styled(format!(" · ${:.3}", c), dim));
+            }
+            out
+        }
+        "agent.notified" => {
+            let msg = p.and_then(|v| v.get("message")).and_then(|v| v.as_str()).unwrap_or("");
+            if msg.is_empty() {
+                Vec::new()
+            } else {
+                vec![Span::styled(
+                    msg.to_string(),
+                    Style::default().fg(colors::severity_color(&Severity::Warn)),
+                )]
+            }
+        }
+        // turn.completed (empty payload) and unknown types: no extra detail.
+        _ => Vec::new(),
+    }
+}
+
+fn spark7(buckets: &[f64; 7]) -> String {
+    const GLYPHS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let max = buckets.iter().cloned().fold(0.0f64, f64::max);
+    if max <= 0.0 { return GLYPHS[0].to_string().repeat(7); }
+    buckets.iter().map(|&v| {
+        if v <= 0.0 { GLYPHS[0] }
+        else {
+            let idx = ((v / max) * (GLYPHS.len() as f64 - 1.0)).ceil() as usize;
+            GLYPHS[idx.min(GLYPHS.len() - 1)]
+        }
+    }).collect()
 }
 
 pub fn draw_status_bar(f: &mut Frame, area: Rect, state: &AppState) {
@@ -148,7 +255,8 @@ pub fn draw_help_overlay(f: &mut Frame, state: &AppState) {
 }
 
 pub fn draw_toast(f: &mut Frame, state: &AppState) {
-    let Some((msg, _)) = &state.toast else { return; };
+    let Some(t) = &state.toast else { return; };
+    let msg = &t.msg;
     let area = f.area();
     // Render as a one-line strip at row h-2 (just above the status bar),
     // right-aligned within the full width with brand-orange foreground.
@@ -225,8 +333,52 @@ pub fn draw_tiles_list(f: &mut Frame, area: Rect, state: &AppState) {
             Span::styled(format!("{:>4}", last), Style::default().fg(Color::DarkGray)),
             glyph,
         ]));
+        lines.push(tile_metrics_line(t));
     }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Render line 2 of a tile row — the metrics line. Empty Line if
+/// `tile.metrics` is None (whitespace).
+pub fn tile_metrics_line(tile: &crate::events::tiles::tile::Tile) -> ratatui::text::Line<'static> {
+    use ratatui::style::{Style, Color};
+    use ratatui::text::{Line, Span};
+    let Some(m) = tile.metrics.as_ref() else { return Line::raw(""); };
+
+    let bar = ctx_bar(m.context_pct.unwrap_or(0.0));
+    let pct_label = match m.context_pct {
+        Some(p) => format!("{:>3}%", (p * 100.0).round() as i64),
+        None    => "  —".to_string(),
+    };
+    let pct_color = match m.context_pct {
+        Some(p) => crate::cmd::top::colors::ctx_band_color(p),
+        None    => Color::DarkGray,
+    };
+    let cost = match m.session_cost_usd {
+        Some(c) => format!("${:.2}", c),
+        None    => "$—".to_string(),
+    };
+    let cache = match m.cache_hit_pct {
+        Some(p) => format!("c {:>2}%", (p * 100.0).round() as i64),
+        None    => "c —".to_string(),
+    };
+    Line::from(vec![
+        Span::raw("    "),  // indent past cursor (2) + small breathing
+        Span::styled(format!("{} ", bar), Style::default().fg(pct_color)),
+        Span::styled(pct_label, Style::default().fg(pct_color)),
+        Span::raw("  "),
+        Span::raw(cost),
+        Span::raw("  "),
+        Span::raw(cache),
+    ])
+}
+
+/// 10-cell context bar from a 0..1 ratio. Clamps over 1.0 to fully filled.
+fn ctx_bar(pct: f64) -> String {
+    let cells = 10usize;
+    let filled = (pct * cells as f64).round() as usize;
+    let filled = filled.min(cells);
+    "▰".repeat(filled) + &"▱".repeat(cells - filled)
 }
 
 pub fn draw_detail_pane(f: &mut Frame, area: Rect, state: &AppState) {
@@ -256,12 +408,16 @@ pub fn draw_detail_pane(f: &mut Frame, area: Rect, state: &AppState) {
     let now = now_ms();
     let mut lines: Vec<Line> = Vec::new();
 
+    // Cost & Context panel (pinned at top).
+    lines.extend(cost_context_panel_lines(t));
+
     let notifs = state.notifications_for_selected();
 
     // Fixed rows: surface(1) + counts(1) + blank(1) + activity_header(1) + sparkline(1)
     //           + blank(1) + recent_header(1) + blank(1) + notifs_header(1) + notif_lines
     let notif_lines = if notifs.is_empty() { 1 } else { notifs.len() as u16 };
-    let fixed_rows = 9 + notif_lines;
+    let panel_rows = if t.metrics.is_some() { 6 } else { 1 };
+    let fixed_rows = 9 + notif_lines + panel_rows;
     let max_events = (inner.height.saturating_sub(fixed_rows)).max(1) as usize;
 
     lines.push(Line::from(Span::styled(t.surface_label.clone(), Style::default().fg(Color::Cyan))));
@@ -287,10 +443,16 @@ pub fn draw_detail_pane(f: &mut Frame, area: Rect, state: &AppState) {
     } else {
         for e in state.recent_events.iter().take(max_events) {
             let when = relative_time(e.event_ts, now);
-            lines.push(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(format!("  {:>5}  ", when), Style::default().fg(Color::DarkGray)),
                 Span::raw(e.event_type.clone()),
-            ]));
+            ];
+            let detail = event_detail_spans(e);
+            if !detail.is_empty() {
+                spans.push(Span::styled("  ".to_string(), Style::default().fg(Color::DarkGray)));
+                spans.extend(detail);
+            }
+            lines.push(Line::from(spans));
         }
     }
     lines.push(Line::from(""));
@@ -349,6 +511,80 @@ fn empty_message(state: &AppState) -> String {
     }
 }
 
+/// Render the pinned "Cost & Context" panel content as a `Vec<Line>`.
+/// The caller is responsible for placing it (e.g., as the first lines
+/// of the detail pane). Returns 5 lines for present metrics + 1 divider,
+/// or 1 line ("—") for missing metrics.
+pub fn cost_context_panel_lines(tile: &crate::events::tiles::tile::Tile)
+    -> Vec<ratatui::text::Line<'static>>
+{
+    use ratatui::style::{Style, Color};
+    use ratatui::text::{Line, Span};
+
+    let Some(m) = tile.metrics.as_ref() else {
+        return vec![Line::from(Span::styled("—", Style::default().fg(Color::DarkGray)))];
+    };
+
+    let pct_color = m.context_pct.map(crate::cmd::top::colors::ctx_band_color)
+                                 .unwrap_or(Color::DarkGray);
+    let bar = m.context_pct.map(ctx_bar).unwrap_or_else(|| " ".repeat(10));
+    let pct_label = match m.context_pct {
+        Some(p) => {
+            let max_str = match m.context_max_tokens {
+                Some(mx) => format_tokens_short(mx),
+                None     => "—".to_string(),
+            };
+            format!("{}% · {} / {} tokens",
+                (p * 100.0).round() as i64,
+                format_tokens_short(m.context_used_tokens),
+                max_str)
+        }
+        None => "—".to_string(),
+    };
+    let session_cost = m.session_cost_usd.map(|c| format!("${:.2} session", c))
+                                         .unwrap_or_else(|| "$— session".to_string());
+    let burn = m.burn_rate_usd_hr.map(|b| format!("${:.2}/hr burn rate", b))
+                                 .unwrap_or_else(|| "$—/hr burn rate".to_string());
+    let toks_line = format!(
+        "in {} · out {} · cache-r {} · cache-w {} · think {}",
+        format_tokens_short(m.tokens.input),
+        format_tokens_short(m.tokens.output),
+        format_tokens_short(m.tokens.cache_read),
+        format_tokens_short(m.tokens.cache_write),
+        format_tokens_short(m.tokens.reasoning),
+    );
+    let cache = match m.cache_hit_pct {
+        Some(p) => format!("{}% hit rate", (p * 100.0).round() as i64),
+        None    => "— hit rate".to_string(),
+    };
+
+    vec![
+        Line::from(Span::styled(m.model.clone(),
+            Style::default().fg(BRAND_ORANGE))),
+        Line::from(vec![
+            Span::raw("context  "),
+            Span::styled(bar, Style::default().fg(pct_color)),
+            Span::raw("  "),
+            Span::styled(pct_label, Style::default().fg(pct_color)),
+        ]),
+        Line::from(vec![
+            Span::raw("cost     "),
+            Span::raw(session_cost),
+            Span::raw(" · "),
+            Span::raw(burn),
+        ]),
+        Line::from(vec![
+            Span::raw("tokens   "),
+            Span::raw(toks_line),
+        ]),
+        Line::from(vec![
+            Span::raw("cache    "),
+            Span::raw(cache),
+        ]),
+        Line::from(Span::styled("─".repeat(60), Style::default().fg(Color::DarkGray))),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,8 +602,10 @@ mod tests {
     fn brand_mark_appears_at_origin() {
         let state = AppState::new();
         let buf = render(&state, 80, 5);
-        // Cell 0,0 is "▌"; cell 1,0 is "Z" with orange bg + black fg.
-        let z = buf.cell((1, 0)).unwrap();
+        // Stat band block has a top border at row 0 (left border at col 0) and
+        // inner content begins at (1, 1). The line starts with " Z " (leading
+        // space, then the brand mark), so "Z" lands at col 2, row 1.
+        let z = buf.cell((2, 1)).unwrap();
         assert_eq!(z.symbol(), "Z");
         assert_eq!(z.bg, BRAND_ORANGE);
         assert_eq!(z.fg, Color::Black);
@@ -424,6 +662,7 @@ mod tests {
             event_count: 5,
             latest_event_type: "turn.completed".to_string(),
             focus_uri: Some("workspace://x".to_string()),
+            metrics: None,
         }
     }
 
@@ -433,8 +672,10 @@ mod tests {
         state.tiles = vec![fake_tile("claude-code", "zestful", "tmux:z/pane:%0")];
         state.connection = Connection::Live;
         let buf = render(&state, 80, 10);
-        // Body starts at row 1. The first tile row should have ▶ near the start.
-        let row1: String = (0..40).map(|x| buf.cell((x, 2)).unwrap().symbol().to_string()).collect::<Vec<_>>().join("");
+        // Stat band occupies rows 0..3, body starts at row 3 (top border of
+        // tiles block), inner content at row 4. The first tile row should
+        // have ▶ near the start.
+        let row1: String = (0..40).map(|x| buf.cell((x, 4)).unwrap().symbol().to_string()).collect::<Vec<_>>().join("");
         assert!(row1.contains("▶"), "expected ▶ cursor, got: {}", row1);
         assert!(row1.contains("claude-code"));
     }
@@ -501,7 +742,11 @@ mod tests {
     #[test]
     fn toast_renders_when_set() {
         let mut state = AppState::new();
-        state.toast = Some(("focus failed: x".to_string(), std::time::Instant::now()));
+        state.toast = Some(crate::cmd::top::app::ToastEntry {
+            msg: "focus failed: x".to_string(),
+            since: std::time::Instant::now(),
+            lifetime: std::time::Duration::from_secs(3),
+        });
         let buf = render(&state, 80, 10);
         let mut all = String::new();
         for y in 0..10 {
@@ -509,5 +754,286 @@ mod tests {
             all.push('\n');
         }
         assert!(all.contains("focus failed: x"), "expected toast text in buffer, got:\n{}", all);
+    }
+
+    fn make_state_with_summary() -> AppState {
+        let mut s = AppState::new();
+        s.summary = Some(crate::events::summary::Summary {
+            today_cost_usd: 4.27,
+            today_tokens: 142_300,
+            agents: 3,
+            sessions: 7,
+            cost_sparkline: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+        });
+        s
+    }
+
+    #[test]
+    fn stat_band_renders_dollar_today_and_token_count() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(120, 25);
+        let mut term = Terminal::new(backend).unwrap();
+        let state = make_state_with_summary();
+        term.draw(|f| draw(f, &state)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text = (0..3).map(|y| {
+            (0..120).map(|x| buf.cell((x as u16, y as u16)).map(|c| c.symbol()).unwrap_or(""))
+                    .collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("$4.27"),    "expected $4.27 in stat band, got:\n{}", text);
+        assert!(text.contains("142.3K"),   "expected 142.3K in stat band, got:\n{}", text);
+        assert!(text.contains("3 agents"), "expected agent count, got:\n{}", text);
+        assert!(text.contains("7 sessions"), "expected session count, got:\n{}", text);
+    }
+
+    #[test]
+    fn stat_band_shows_dashes_when_summary_missing() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(120, 25);
+        let mut term = Terminal::new(backend).unwrap();
+        let state = AppState::new(); // summary: None
+        term.draw(|f| draw(f, &state)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text = (0..3).map(|y| {
+            (0..120).map(|x| buf.cell((x as u16, y as u16)).map(|c| c.symbol()).unwrap_or(""))
+                    .collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("—"), "expected '—' placeholder in stat band, got:\n{}", text);
+    }
+
+    fn make_tile_with_metrics(pct: f64, cost: f64, cache: f64) -> crate::events::tiles::tile::Tile {
+        use crate::events::tiles::tile::{Tile, TileMetrics};
+        use crate::events::payload::TurnTokens;
+        Tile {
+            id: "tile_x".into(), agent: "claude-code".into(),
+            project_anchor: Some("/x/zestful".into()),
+            project_label: Some("zestful".into()),
+            surface_kind: "cli".into(),
+            surface_token: "tmux:z/pane:%0".into(),
+            surface_label: "tmux[z:0]".into(),
+            first_seen_at: 0, last_seen_at: 0,
+            event_count: 42, latest_event_type: "turn.completed".into(),
+            focus_uri: None,
+            metrics: Some(TileMetrics {
+                model: "claude-opus-4-7".into(),
+                session_id: "s1".into(),
+                context_pct: Some(pct),
+                context_used_tokens: 730_000,
+                context_max_tokens: Some(1_000_000),
+                session_cost_usd: Some(cost),
+                cache_hit_pct: Some(cache),
+                burn_rate_usd_hr: Some(1.15),
+                tokens: TurnTokens {
+                    input: 12450, output: 832, cache_read: 8120,
+                    cache_write: 0, reasoning: 0,
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn tile_row_shows_ctx_pct_and_session_cost() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(120, 25);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut state = make_state_with_summary();
+        state.tiles = vec![make_tile_with_metrics(0.73, 0.42, 0.71)];
+        term.draw(|f| draw(f, &state)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text = (0..25).map(|y| {
+            (0..120).map(|x| buf.cell((x as u16, y as u16)).map(|c| c.symbol()).unwrap_or(""))
+                    .collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("73%"), "expected '73%' in tile area:\n{}", text);
+        assert!(text.contains("$0.42"), "expected '$0.42':\n{}", text);
+        assert!(text.contains("c 71%"), "expected 'c 71%':\n{}", text);
+    }
+
+    #[test]
+    fn detail_pane_shows_cost_and_context_panel_when_metrics_present() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(120, 25);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut state = make_state_with_summary();
+        state.tiles = vec![make_tile_with_metrics(0.73, 0.42, 0.71)];
+        state.selected = 0;
+        term.draw(|f| draw(f, &state)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text = (0..25).map(|y| {
+            (0..120).map(|x| buf.cell((x as u16, y as u16)).map(|c| c.symbol()).unwrap_or(""))
+                    .collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("claude-opus-4-7"),  "expected model line: {}", text);
+        assert!(text.contains("$0.42 session"),    "expected session cost: {}", text);
+        assert!(text.contains("$1.15/hr"),         "expected burn rate: {}", text);
+        assert!(text.contains("in 12.4K"),         "expected token line: {}", text);
+        assert!(text.contains("71% hit"),          "expected cache line: {}", text);
+    }
+
+    #[test]
+    fn tile_row_omits_metrics_line_when_metrics_none() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(120, 25);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut state = make_state_with_summary();
+        let mut t = make_tile_with_metrics(0.5, 0.0, 0.0);
+        t.metrics = None;
+        state.tiles = vec![t];
+        term.draw(|f| draw(f, &state)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text = (0..25).map(|y| {
+            (0..120).map(|x| buf.cell((x as u16, y as u16)).map(|c| c.symbol()).unwrap_or(""))
+                    .collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        // No "%" or "$" associated with the metrics row.
+        assert!(!text.contains("ctx"));
+    }
+
+    fn render_to_string(state: &AppState) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(120, 25);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, state)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..25).map(|y| {
+            (0..120).map(|x| buf.cell((x as u16, y as u16)).map(|c| c.symbol()).unwrap_or(""))
+                    .collect::<String>()
+        }).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn snapshot_healthy_fleet() {
+        let mut s = make_state_with_summary();
+        s.tiles = vec![
+            make_tile_with_metrics(0.10, 0.05, 0.22),
+            make_tile_with_metrics(0.30, 0.18, 0.45),
+        ];
+        let text = render_to_string(&s);
+        assert!(text.contains("$4.27"));
+        assert!(text.contains("10%"));
+        assert!(text.contains("30%"));
+    }
+
+    #[test]
+    fn snapshot_amber_tile_present() {
+        let mut s = make_state_with_summary();
+        s.tiles = vec![make_tile_with_metrics(0.75, 0.42, 0.71)];
+        let text = render_to_string(&s);
+        assert!(text.contains("75%"));
+    }
+
+    #[test]
+    fn snapshot_critical_tile_present() {
+        let mut s = make_state_with_summary();
+        s.tiles = vec![make_tile_with_metrics(0.95, 1.92, 0.88)];
+        let text = render_to_string(&s);
+        assert!(text.contains("95%"));
+    }
+
+    #[test]
+    fn snapshot_missing_summary_shows_dashes() {
+        let mut s = AppState::new();
+        s.tiles = vec![make_tile_with_metrics(0.10, 0.05, 0.22)];
+        let text = render_to_string(&s);
+        assert!(text.contains("—"));
+        assert!(text.contains("10%"), "tile metrics still render even when summary is None");
+    }
+
+    #[test]
+    fn snapshot_no_metrics_yet_keeps_layout() {
+        let mut s = make_state_with_summary();
+        let mut t = make_tile_with_metrics(0.5, 0.0, 0.0);
+        t.metrics = None;
+        s.tiles = vec![t];
+        let text = render_to_string(&s);
+        assert!(text.contains("$4.27")); // stat band intact
+    }
+
+    fn synth_event(event_type: &str, payload: serde_json::Value) -> crate::events::store::query::EventRow {
+        crate::events::store::query::EventRow {
+            id: 1, received_at: 0, event_id: "e1".into(),
+            event_type: event_type.into(), source: "hook".into(),
+            session_id: Some("s1".into()), project: None,
+            host: "h".into(), os_user: "u".into(), device_id: "d".into(),
+            event_ts: 0, seq: 0, source_pid: 1, schema_version: 1,
+            correlation: None, context: None, payload: Some(payload),
+        }
+    }
+
+    fn span_text(spans: &[Span<'_>]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn event_detail_tool_completed_shows_tool_name_and_duration() {
+        let e = synth_event("tool.completed", serde_json::json!({
+            "tool_name": "Bash", "duration_ms": 79,
+            "result_preview": "long output goes here"
+        }));
+        let spans = event_detail_spans(&e);
+        let text = span_text(&spans);
+        assert!(text.contains("Bash"),  "expected tool name, got: {:?}", text);
+        assert!(text.contains("79ms"),  "expected duration, got: {:?}", text);
+    }
+
+    #[test]
+    fn event_detail_turn_metrics_shows_model_and_token_counts() {
+        let e = synth_event("turn.metrics", serde_json::json!({
+            "model": "claude-opus-4-7",
+            "tokens": { "input": 1500, "output": 200, "cache_read": 0, "cache_write": 0, "reasoning": 0 },
+            "context": { "used_tokens": 1500, "max_tokens": 200000, "ratio": 0.0075 },
+            "cost_estimate_usd": 0.012,
+            "message_count": 1,
+        }));
+        let spans = event_detail_spans(&e);
+        let text = span_text(&spans);
+        assert!(text.contains("claude-opus-4-7"), "expected model, got: {:?}", text);
+        assert!(text.contains("1.5K"),            "expected input tokens, got: {:?}", text);
+        assert!(text.contains("200"),             "expected output tokens, got: {:?}", text);
+        assert!(text.contains("$0.012"),          "expected cost, got: {:?}", text);
+    }
+
+    #[test]
+    fn event_detail_agent_notified_shows_message() {
+        let e = synth_event("agent.notified", serde_json::json!({
+            "kind": "notification",
+            "message": "Claude is waiting for your input",
+        }));
+        let spans = event_detail_spans(&e);
+        let text = span_text(&spans);
+        assert!(text.contains("Claude is waiting for your input"),
+                "expected notification message, got: {:?}", text);
+    }
+
+    #[test]
+    fn event_detail_turn_completed_renders_no_extra_detail() {
+        // turn.completed carries an empty payload — there's nothing
+        // useful to show beyond the event_type itself, so the detail
+        // spans are empty (the row still renders the type + time).
+        let e = synth_event("turn.completed", serde_json::json!({}));
+        let spans = event_detail_spans(&e);
+        assert!(spans.is_empty(), "expected no detail spans, got: {:?}", span_text(&spans));
+    }
+
+    #[test]
+    fn event_detail_unknown_event_type_renders_no_detail() {
+        let e = synth_event("totally.made.up", serde_json::json!({"foo": "bar"}));
+        assert!(event_detail_spans(&e).is_empty());
+    }
+
+    #[test]
+    fn event_detail_tool_completed_handles_missing_fields() {
+        // Defensive: a malformed/legacy event with no payload fields
+        // should still produce a sensible (placeholder) detail.
+        let e = synth_event("tool.completed", serde_json::json!({}));
+        let spans = event_detail_spans(&e);
+        let text = span_text(&spans);
+        assert!(text.contains("?"), "expected '?' placeholder for missing tool_name, got: {:?}", text);
     }
 }

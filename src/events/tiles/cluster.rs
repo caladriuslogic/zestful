@@ -64,6 +64,7 @@ pub fn group(rows: &[DerivedRow]) -> Vec<tile::Tile> {
                 event_count,
                 latest_event_type,
                 focus_uri,
+                metrics: None,
             }
         })
         .collect();

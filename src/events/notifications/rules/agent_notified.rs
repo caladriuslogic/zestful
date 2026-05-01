@@ -76,6 +76,7 @@ mod tests {
             event_count: 0,
             latest_event_type: "".to_string(),
             focus_uri: None,
+            metrics: None,
         }
     }
 
