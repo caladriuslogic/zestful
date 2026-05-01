@@ -11,20 +11,25 @@ use crate::events::notifications::notification::Notification;
 use crate::events::store::query::EventRow;
 use crate::cmd::top::keys::{Action, InputMode};
 use std::time::Instant;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortMode {
     LastSeenDesc,
     EventCountDesc,
     AgentAsc,
+    CtxPctDesc,
+    SessionCostDesc,
 }
 
 impl SortMode {
     pub fn next(self) -> SortMode {
         match self {
-            SortMode::LastSeenDesc   => SortMode::EventCountDesc,
-            SortMode::EventCountDesc => SortMode::AgentAsc,
-            SortMode::AgentAsc       => SortMode::LastSeenDesc,
+            SortMode::LastSeenDesc    => SortMode::EventCountDesc,
+            SortMode::EventCountDesc  => SortMode::AgentAsc,
+            SortMode::AgentAsc        => SortMode::CtxPctDesc,
+            SortMode::CtxPctDesc      => SortMode::SessionCostDesc,
+            SortMode::SessionCostDesc => SortMode::LastSeenDesc,
         }
     }
 }
@@ -47,6 +52,40 @@ pub enum SideEffect {
     PostFocus { terminal_uri: String, tile_id: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // variants consumed by ui.rs ctx-band rendering in Task 9
+pub enum CtxBand { Healthy, Warming, Critical }
+
+/// Map a context ratio (0.0–1.0+) to a band. Uses spec-defined cutoffs.
+#[allow(dead_code)] // wired into TUI event loop + renderer in Tasks 10/12/13
+pub fn ctx_band(pct: f64) -> CtxBand {
+    if pct < 0.70 { CtxBand::Healthy }
+    else if pct < 0.90 { CtxBand::Warming }
+    else { CtxBand::Critical }
+}
+
+/// Return the band to toast about if `current` is an upward crossing
+/// from `prev`. `None` means: don't emit a toast.
+#[allow(dead_code)] // used by update_tiles_and_emit_toasts (wired in Task 10)
+pub fn crossed_ctx_band(prev: Option<CtxBand>, current: CtxBand) -> Option<CtxBand> {
+    let rank = |b: CtxBand| match b {
+        CtxBand::Healthy => 0u8, CtxBand::Warming => 1, CtxBand::Critical => 2,
+    };
+    match (prev, current) {
+        (None, CtxBand::Healthy) => None,
+        (None, b) => Some(b),
+        (Some(p), c) if rank(c) > rank(p) => Some(c),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ToastEntry {
+    pub msg: String,
+    pub since: Instant,
+    pub lifetime: Duration,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub tiles: Vec<Tile>,
@@ -60,7 +99,11 @@ pub struct AppState {
     pub sort: SortMode,
     pub notif_only: bool,
     pub help_open: bool,
-    pub toast: Option<(String, Instant)>,
+    pub toast: Option<ToastEntry>,
+    #[allow(dead_code)] // populated by /summary fetch + rendered by stat band in Tasks 10/12
+    pub summary: Option<crate::events::summary::Summary>,
+    #[allow(dead_code)] // populated by update_tiles_and_emit_toasts (wired in Task 10)
+    pub seen_ctx_band: std::collections::HashMap<String, CtxBand>,
     pub should_quit: bool,
     pub fullscreen: bool,
 }
@@ -80,6 +123,8 @@ impl AppState {
             notif_only: false,
             help_open: false,
             toast: None,
+            summary: None,
+            seen_ctx_band: std::collections::HashMap::new(),
             should_quit: false,
             fullscreen: false,
         }
@@ -211,10 +256,11 @@ impl AppState {
                             terminal_uri: uri.clone(),
                             tile_id: t.id.clone(),
                         }),
-                        None => self.toast = Some((
-                            "no focus URI for this tile (yet)".to_string(),
-                            Instant::now(),
-                        )),
+                        None => self.toast = Some(ToastEntry {
+                            msg: "no focus URI for this tile (yet)".to_string(),
+                            since: Instant::now(),
+                            lifetime: Duration::from_secs(3),
+                        }),
                     }
                 }
             }
@@ -224,6 +270,40 @@ impl AppState {
             Action::ToggleHelp      => { self.help_open = !self.help_open; }
         }
         fx
+    }
+
+    /// Replace `tiles` with `new_tiles`, scan for context-band crossings on
+    /// each session, and emit at most one toast per call (most recent
+    /// upward crossing wins). Sessions absent from `new_tiles` are evicted
+    /// from `seen_ctx_band` to bound memory.
+    #[allow(dead_code)] // wired into TUI event loop in Task 10
+    pub fn update_tiles_and_emit_toasts(&mut self, new_tiles: Vec<Tile>) {
+        let now = Instant::now();
+        let mut latest_toast: Option<ToastEntry> = None;
+        let mut active_sessions = std::collections::HashSet::<String>::new();
+        for t in &new_tiles {
+            let Some(m) = t.metrics.as_ref() else { continue; };
+            let Some(pct) = m.context_pct else { continue; };
+            active_sessions.insert(m.session_id.clone());
+            let band = ctx_band(pct);
+            let prev = self.seen_ctx_band.get(&m.session_id).copied();
+            if let Some(emit_band) = crossed_ctx_band(prev, band) {
+                let (label, lifetime) = match emit_band {
+                    CtxBand::Warming  => ("70% context — keep an eye", Duration::from_secs(4)),
+                    CtxBand::Critical => ("90% context — wrap up soon", Duration::from_secs(6)),
+                    CtxBand::Healthy  => continue, // unreachable per crossed_ctx_band
+                };
+                let project = t.project_label.as_deref().unwrap_or("?");
+                let msg = format!("{} @ {}: {}", t.agent, project, label);
+                latest_toast = Some(ToastEntry { msg, since: now, lifetime });
+            }
+            self.seen_ctx_band.insert(m.session_id.clone(), band);
+        }
+        if let Some(toast) = latest_toast {
+            self.toast = Some(toast);
+        }
+        self.seen_ctx_band.retain(|sid, _| active_sessions.contains(sid));
+        self.tiles = new_tiles;
     }
 }
 
@@ -238,11 +318,32 @@ fn matches_filter(needle: &str, t: &Tile) -> bool {
 }
 
 /// Sort tiles in place per `mode`. Stable: ties preserve input order.
+/// Tiles with `metrics: None` sort last under metric-driven modes.
 fn sort_tiles(tiles: &mut Vec<&Tile>, mode: SortMode) {
     match mode {
         SortMode::LastSeenDesc => tiles.sort_by(|a, b| b.last_seen_at.cmp(&a.last_seen_at)),
         SortMode::EventCountDesc => tiles.sort_by(|a, b| b.event_count.cmp(&a.event_count)),
         SortMode::AgentAsc => tiles.sort_by(|a, b| a.agent.cmp(&b.agent)),
+        SortMode::CtxPctDesc => tiles.sort_by(|a, b| {
+            let ka = a.metrics.as_ref().and_then(|m| m.context_pct);
+            let kb = b.metrics.as_ref().and_then(|m| m.context_pct);
+            match (ka, kb) {
+                (Some(x), Some(y)) => y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal),
+                (Some(_), None)    => std::cmp::Ordering::Less,
+                (None, Some(_))    => std::cmp::Ordering::Greater,
+                (None, None)       => std::cmp::Ordering::Equal,
+            }
+        }),
+        SortMode::SessionCostDesc => tiles.sort_by(|a, b| {
+            let ka = a.metrics.as_ref().and_then(|m| m.session_cost_usd);
+            let kb = b.metrics.as_ref().and_then(|m| m.session_cost_usd);
+            match (ka, kb) {
+                (Some(x), Some(y)) => y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal),
+                (Some(_), None)    => std::cmp::Ordering::Less,
+                (None, Some(_))    => std::cmp::Ordering::Greater,
+                (None, None)       => std::cmp::Ordering::Equal,
+            }
+        }),
     }
 }
 
@@ -363,7 +464,7 @@ mod tests {
         let fx = s.apply(Action::Focus);
         assert!(fx.is_empty());
         assert!(s.toast.is_some());
-        assert!(s.toast.as_ref().unwrap().0.contains("no focus URI"));
+        assert!(s.toast.as_ref().unwrap().msg.contains("no focus URI"));
     }
 
     #[test]
@@ -384,6 +485,8 @@ mod tests {
         assert_eq!(s.sort, SortMode::LastSeenDesc);
         s.apply(Action::CycleSort); assert_eq!(s.sort, SortMode::EventCountDesc);
         s.apply(Action::CycleSort); assert_eq!(s.sort, SortMode::AgentAsc);
+        s.apply(Action::CycleSort); assert_eq!(s.sort, SortMode::CtxPctDesc);
+        s.apply(Action::CycleSort); assert_eq!(s.sort, SortMode::SessionCostDesc);
         s.apply(Action::CycleSort); assert_eq!(s.sort, SortMode::LastSeenDesc);
     }
 
@@ -474,5 +577,120 @@ mod tests {
         let s: Vec<char> = sparkline_glyphs(&bins).chars().collect();
         assert_eq!(s[10], '█'); // max
         assert!(s[20] != '▁' && s[20] != '█'); // mid-range
+    }
+
+    #[test]
+    fn sort_mode_cycles_through_five_states() {
+        let mut s = SortMode::LastSeenDesc;
+        s = s.next(); assert_eq!(s, SortMode::EventCountDesc);
+        s = s.next(); assert_eq!(s, SortMode::AgentAsc);
+        s = s.next(); assert_eq!(s, SortMode::CtxPctDesc);
+        s = s.next(); assert_eq!(s, SortMode::SessionCostDesc);
+        s = s.next(); assert_eq!(s, SortMode::LastSeenDesc);
+    }
+
+    #[test]
+    fn ctx_band_thresholds() {
+        assert_eq!(ctx_band(0.0),  CtxBand::Healthy);
+        assert_eq!(ctx_band(0.69), CtxBand::Healthy);
+        assert_eq!(ctx_band(0.70), CtxBand::Warming);
+        assert_eq!(ctx_band(0.89), CtxBand::Warming);
+        assert_eq!(ctx_band(0.90), CtxBand::Critical);
+        assert_eq!(ctx_band(1.50), CtxBand::Critical);
+    }
+
+    #[test]
+    fn crossed_ctx_band_only_emits_on_upward_crossing() {
+        // None → any band emits the new band (first sighting), except Healthy.
+        assert_eq!(crossed_ctx_band(None, CtxBand::Healthy),  None);
+        assert_eq!(crossed_ctx_band(None, CtxBand::Warming),  Some(CtxBand::Warming));
+        assert_eq!(crossed_ctx_band(None, CtxBand::Critical), Some(CtxBand::Critical));
+        // Upward crossings emit.
+        assert_eq!(crossed_ctx_band(Some(CtxBand::Healthy), CtxBand::Warming),
+                   Some(CtxBand::Warming));
+        assert_eq!(crossed_ctx_band(Some(CtxBand::Warming), CtxBand::Critical),
+                   Some(CtxBand::Critical));
+        assert_eq!(crossed_ctx_band(Some(CtxBand::Healthy), CtxBand::Critical),
+                   Some(CtxBand::Critical));
+        // Same band — no emit.
+        assert_eq!(crossed_ctx_band(Some(CtxBand::Warming),  CtxBand::Warming),  None);
+        assert_eq!(crossed_ctx_band(Some(CtxBand::Critical), CtxBand::Critical), None);
+        // Downward — no emit.
+        assert_eq!(crossed_ctx_band(Some(CtxBand::Critical), CtxBand::Warming),  None);
+        assert_eq!(crossed_ctx_band(Some(CtxBand::Critical), CtxBand::Healthy),  None);
+        assert_eq!(crossed_ctx_band(Some(CtxBand::Warming),  CtxBand::Healthy),  None);
+    }
+
+    #[test]
+    fn update_tiles_emits_toast_on_first_warming_crossing() {
+        use crate::events::tiles::tile::{Tile, TileMetrics};
+        use crate::events::payload::TurnTokens;
+
+        let mut s = AppState::new();
+        let tile = Tile {
+            id: "tile_a".into(), agent: "claude-code".into(),
+            project_anchor: Some("/x".into()), project_label: Some("x".into()),
+            surface_kind: "cli".into(), surface_token: "t".into(),
+            surface_label: "t".into(), first_seen_at: 0, last_seen_at: 0,
+            event_count: 0, latest_event_type: "x".into(), focus_uri: None,
+            metrics: Some(TileMetrics {
+                model: "claude-3-5-sonnet-20241022".into(),
+                session_id: "s1".into(),
+                context_pct: Some(0.75),
+                context_used_tokens: 150_000,
+                context_max_tokens: Some(200_000),
+                session_cost_usd: Some(0.10),
+                cache_hit_pct: Some(0.5),
+                burn_rate_usd_hr: Some(0.5),
+                tokens: TurnTokens::default(),
+            }),
+        };
+        s.update_tiles_and_emit_toasts(vec![tile.clone()]);
+        // First sighting at 75% (Warming) emits.
+        assert!(s.toast.is_some(), "expected a toast to fire");
+        let msg = &s.toast.as_ref().unwrap().msg;
+        assert!(msg.contains("70%"), "expected '70%' in toast: {}", msg);
+
+        // Refresh with the same band — no new toast.
+        s.toast = None;
+        s.update_tiles_and_emit_toasts(vec![tile.clone()]);
+        assert!(s.toast.is_none(), "no re-toast for same band");
+
+        // Crossing into Critical — new toast.
+        let mut tile2 = tile.clone();
+        tile2.metrics.as_mut().unwrap().context_pct = Some(0.92);
+        s.update_tiles_and_emit_toasts(vec![tile2]);
+        let msg2 = &s.toast.as_ref().unwrap().msg;
+        assert!(msg2.contains("90%"), "expected '90%' in critical toast: {}", msg2);
+    }
+
+    #[test]
+    fn sort_ctx_pct_desc_places_none_at_bottom() {
+        use crate::events::tiles::tile::{Tile, TileMetrics};
+        use crate::events::payload::TurnTokens;
+        let mk = |id: &str, agent: &str, pct: Option<f64>| Tile {
+            id: id.into(), agent: agent.into(),
+            project_anchor: Some("/x".into()), project_label: Some("x".into()),
+            surface_kind: "cli".into(), surface_token: "t".into(),
+            surface_label: "t".into(), first_seen_at: 0, last_seen_at: 0,
+            event_count: 0, latest_event_type: "x".into(), focus_uri: None,
+            metrics: pct.map(|p| TileMetrics {
+                model: "m".into(), session_id: "s".into(),
+                context_pct: Some(p),
+                context_used_tokens: 0,
+                context_max_tokens: None,
+                session_cost_usd: None,
+                cache_hit_pct: None, burn_rate_usd_hr: None,
+                tokens: TurnTokens::default(),
+            }),
+        };
+        let lo   = mk("lo",   "a", Some(0.10));
+        let hi   = mk("hi",   "a", Some(0.90));
+        let none = mk("none", "a", None);
+        let mut tiles: Vec<&Tile> = vec![&lo, &hi, &none];
+        sort_tiles(&mut tiles, SortMode::CtxPctDesc);
+        assert_eq!(tiles[0].id, "hi");
+        assert_eq!(tiles[1].id, "lo");
+        assert_eq!(tiles[2].id, "none");
     }
 }

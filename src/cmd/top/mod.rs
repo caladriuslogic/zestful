@@ -177,8 +177,8 @@ async fn main_loop(term: &mut Terminal<CrosstermBackend<io::Stdout>>, modal: boo
 
             _ = tick.tick() => {
                 // Local clock work only — toast expiry, relative-time advancement.
-                if let Some((_, when)) = &state.toast {
-                    if when.elapsed() > Duration::from_secs(3) {
+                if let Some(t) = &state.toast {
+                    if t.since.elapsed() > t.lifetime {
                         state.toast = None;
                         needs_redraw = true;
                     }

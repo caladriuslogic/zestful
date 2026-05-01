@@ -148,7 +148,8 @@ pub fn draw_help_overlay(f: &mut Frame, state: &AppState) {
 }
 
 pub fn draw_toast(f: &mut Frame, state: &AppState) {
-    let Some((msg, _)) = &state.toast else { return; };
+    let Some(t) = &state.toast else { return; };
+    let msg = &t.msg;
     let area = f.area();
     // Render as a one-line strip at row h-2 (just above the status bar),
     // right-aligned within the full width with brand-orange foreground.
@@ -502,7 +503,11 @@ mod tests {
     #[test]
     fn toast_renders_when_set() {
         let mut state = AppState::new();
-        state.toast = Some(("focus failed: x".to_string(), std::time::Instant::now()));
+        state.toast = Some(crate::cmd::top::app::ToastEntry {
+            msg: "focus failed: x".to_string(),
+            since: std::time::Instant::now(),
+            lifetime: std::time::Duration::from_secs(3),
+        });
         let buf = render(&state, 80, 10);
         let mut all = String::new();
         for y in 0..10 {
