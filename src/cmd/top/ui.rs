@@ -353,12 +353,16 @@ pub fn draw_detail_pane(f: &mut Frame, area: Rect, state: &AppState) {
     let now = now_ms();
     let mut lines: Vec<Line> = Vec::new();
 
+    // Cost & Context panel (pinned at top).
+    lines.extend(cost_context_panel_lines(t));
+
     let notifs = state.notifications_for_selected();
 
     // Fixed rows: surface(1) + counts(1) + blank(1) + activity_header(1) + sparkline(1)
     //           + blank(1) + recent_header(1) + blank(1) + notifs_header(1) + notif_lines
     let notif_lines = if notifs.is_empty() { 1 } else { notifs.len() as u16 };
-    let fixed_rows = 9 + notif_lines;
+    let panel_rows = if t.metrics.is_some() { 6 } else { 1 };
+    let fixed_rows = 9 + notif_lines + panel_rows;
     let max_events = (inner.height.saturating_sub(fixed_rows)).max(1) as usize;
 
     lines.push(Line::from(Span::styled(t.surface_label.clone(), Style::default().fg(Color::Cyan))));
@@ -444,6 +448,80 @@ fn empty_message(state: &AppState) -> String {
         Connection::Reconnecting    => "Reconnecting to daemon…".to_string(),
         Connection::Live            => "No agent activity in the last hour.\nListening for new events…".to_string(),
     }
+}
+
+/// Render the pinned "Cost & Context" panel content as a `Vec<Line>`.
+/// The caller is responsible for placing it (e.g., as the first lines
+/// of the detail pane). Returns 5 lines for present metrics + 1 divider,
+/// or 1 line ("—") for missing metrics.
+pub fn cost_context_panel_lines(tile: &crate::events::tiles::tile::Tile)
+    -> Vec<ratatui::text::Line<'static>>
+{
+    use ratatui::style::{Style, Color};
+    use ratatui::text::{Line, Span};
+
+    let Some(m) = tile.metrics.as_ref() else {
+        return vec![Line::from(Span::styled("—", Style::default().fg(Color::DarkGray)))];
+    };
+
+    let pct_color = m.context_pct.map(crate::cmd::top::colors::ctx_band_color)
+                                 .unwrap_or(Color::DarkGray);
+    let bar = m.context_pct.map(ctx_bar).unwrap_or_else(|| " ".repeat(10));
+    let pct_label = match m.context_pct {
+        Some(p) => {
+            let max_str = match m.context_max_tokens {
+                Some(mx) => format_tokens_short(mx),
+                None     => "—".to_string(),
+            };
+            format!("{}% · {} / {} tokens",
+                (p * 100.0).round() as i64,
+                format_tokens_short(m.context_used_tokens),
+                max_str)
+        }
+        None => "—".to_string(),
+    };
+    let session_cost = m.session_cost_usd.map(|c| format!("${:.2} session", c))
+                                         .unwrap_or_else(|| "$— session".to_string());
+    let burn = m.burn_rate_usd_hr.map(|b| format!("${:.2}/hr burn rate", b))
+                                 .unwrap_or_else(|| "$—/hr burn rate".to_string());
+    let toks_line = format!(
+        "in {} · out {} · cache-r {} · cache-w {} · think {}",
+        format_tokens_short(m.tokens.input),
+        format_tokens_short(m.tokens.output),
+        format_tokens_short(m.tokens.cache_read),
+        format_tokens_short(m.tokens.cache_write),
+        format_tokens_short(m.tokens.reasoning),
+    );
+    let cache = match m.cache_hit_pct {
+        Some(p) => format!("{}% hit rate", (p * 100.0).round() as i64),
+        None    => "— hit rate".to_string(),
+    };
+
+    vec![
+        Line::from(Span::styled(m.model.clone(),
+            Style::default().fg(BRAND_ORANGE))),
+        Line::from(vec![
+            Span::raw("context  "),
+            Span::styled(bar, Style::default().fg(pct_color)),
+            Span::raw("  "),
+            Span::styled(pct_label, Style::default().fg(pct_color)),
+        ]),
+        Line::from(vec![
+            Span::raw("cost     "),
+            Span::raw(session_cost),
+            Span::raw(" · "),
+            Span::raw(burn),
+        ]),
+        Line::from(vec![
+            Span::raw("tokens   "),
+            Span::raw(toks_line),
+        ]),
+        Line::from(vec![
+            Span::raw("cache    "),
+            Span::raw(cache),
+        ]),
+        Line::from(Span::styled("─".repeat(60), Style::default().fg(Color::DarkGray))),
+    ]
 }
 
 #[cfg(test)]
@@ -711,6 +789,28 @@ mod tests {
         assert!(text.contains("73%"), "expected '73%' in tile area:\n{}", text);
         assert!(text.contains("$0.42"), "expected '$0.42':\n{}", text);
         assert!(text.contains("c 71%"), "expected 'c 71%':\n{}", text);
+    }
+
+    #[test]
+    fn detail_pane_shows_cost_and_context_panel_when_metrics_present() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(120, 25);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut state = make_state_with_summary();
+        state.tiles = vec![make_tile_with_metrics(0.73, 0.42, 0.71)];
+        state.selected = 0;
+        term.draw(|f| draw(f, &state)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text = (0..25).map(|y| {
+            (0..120).map(|x| buf.cell((x as u16, y as u16)).map(|c| c.symbol()).unwrap_or(""))
+                    .collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("claude-opus-4-7"),  "expected model line: {}", text);
+        assert!(text.contains("$0.42 session"),    "expected session cost: {}", text);
+        assert!(text.contains("$1.15/hr"),         "expected burn rate: {}", text);
+        assert!(text.contains("in 12.4K"),         "expected token line: {}", text);
+        assert!(text.contains("71% hit"),          "expected cache line: {}", text);
     }
 
     #[test]
