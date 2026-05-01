@@ -832,4 +832,65 @@ mod tests {
         // No "%" or "$" associated with the metrics row.
         assert!(!text.contains("ctx"));
     }
+
+    fn render_to_string(state: &AppState) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(120, 25);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, state)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..25).map(|y| {
+            (0..120).map(|x| buf.cell((x as u16, y as u16)).map(|c| c.symbol()).unwrap_or(""))
+                    .collect::<String>()
+        }).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn snapshot_healthy_fleet() {
+        let mut s = make_state_with_summary();
+        s.tiles = vec![
+            make_tile_with_metrics(0.10, 0.05, 0.22),
+            make_tile_with_metrics(0.30, 0.18, 0.45),
+        ];
+        let text = render_to_string(&s);
+        assert!(text.contains("$4.27"));
+        assert!(text.contains("10%"));
+        assert!(text.contains("30%"));
+    }
+
+    #[test]
+    fn snapshot_amber_tile_present() {
+        let mut s = make_state_with_summary();
+        s.tiles = vec![make_tile_with_metrics(0.75, 0.42, 0.71)];
+        let text = render_to_string(&s);
+        assert!(text.contains("75%"));
+    }
+
+    #[test]
+    fn snapshot_critical_tile_present() {
+        let mut s = make_state_with_summary();
+        s.tiles = vec![make_tile_with_metrics(0.95, 1.92, 0.88)];
+        let text = render_to_string(&s);
+        assert!(text.contains("95%"));
+    }
+
+    #[test]
+    fn snapshot_missing_summary_shows_dashes() {
+        let mut s = AppState::new();
+        s.tiles = vec![make_tile_with_metrics(0.10, 0.05, 0.22)];
+        let text = render_to_string(&s);
+        assert!(text.contains("—"));
+        assert!(text.contains("10%"), "tile metrics still render even when summary is None");
+    }
+
+    #[test]
+    fn snapshot_no_metrics_yet_keeps_layout() {
+        let mut s = make_state_with_summary();
+        let mut t = make_tile_with_metrics(0.5, 0.0, 0.0);
+        t.metrics = None;
+        s.tiles = vec![t];
+        let text = render_to_string(&s);
+        assert!(text.contains("$4.27")); // stat band intact
+    }
 }
