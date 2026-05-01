@@ -36,14 +36,7 @@ pub fn run(agent: String, command: Vec<String>) -> Result<()> {
 
     let agent_name = format!("{}:{}", agent, cmd_name);
 
-    let (severity, message) = if exit_code == 0 {
-        ("warning", format!("{} finished", cmd_name))
-    } else {
-        (
-            "urgent",
-            format!("{} failed (exit {})", cmd_name, exit_code),
-        )
-    };
+    let severity = if exit_code == 0 { "warning" } else { "urgent" };
 
     crate::log::log(
         "watch",
@@ -104,29 +97,5 @@ mod tests {
         let exit_code = 1;
         let severity = if exit_code == 0 { "warning" } else { "urgent" };
         assert_eq!(severity, "urgent");
-    }
-
-    #[test]
-    fn test_message_on_success() {
-        let cmd_name = "build";
-        let exit_code = 0;
-        let message = if exit_code == 0 {
-            format!("{} finished", cmd_name)
-        } else {
-            format!("{} failed (exit {})", cmd_name, exit_code)
-        };
-        assert_eq!(message, "build finished");
-    }
-
-    #[test]
-    fn test_message_on_failure() {
-        let cmd_name = "build";
-        let exit_code = 42;
-        let message = if exit_code == 0 {
-            format!("{} finished", cmd_name)
-        } else {
-            format!("{} failed (exit {})", cmd_name, exit_code)
-        };
-        assert_eq!(message, "build failed (exit 42)");
     }
 }
