@@ -273,7 +273,7 @@ pub fn draw_detail_pane(f: &mut Frame, area: Rect, state: &AppState) {
     )));
     lines.push(Line::from(""));
 
-    lines.push(Line::from(Span::styled("Activity (last 24 hours)", Style::default().add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(Span::styled("Activity (last hour)", Style::default().add_modifier(Modifier::BOLD))));
     let bins = crate::cmd::top::app::sparkline_bins(&state.recent_events, now);
     lines.push(Line::from(Span::styled(
         sparkline_glyphs(&bins),
@@ -345,7 +345,7 @@ fn empty_message(state: &AppState) -> String {
     match &state.connection {
         Connection::Offline(reason) => format!("Daemon not reachable: {}.\nPress r to retry.", reason),
         Connection::Reconnecting    => "Reconnecting to daemon…".to_string(),
-        Connection::Live            => "No agent activity in the last 24h.\nListening for new events…".to_string(),
+        Connection::Live            => "No agent activity in the last hour.\nListening for new events…".to_string(),
     }
 }
 
