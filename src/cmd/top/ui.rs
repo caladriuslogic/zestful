@@ -1,7 +1,7 @@
 //! ratatui rendering. Pure functions over `&AppState`.
 
 use crate::cmd::top::app::{AppState, Connection, Pane};
-use crate::cmd::top::colors::{self, BRAND_ORANGE, BRAND_ORANGE_LIGHT};
+use crate::cmd::top::colors::{self, BRAND_ORANGE};
 use crate::cmd::top::keys::InputMode;
 use ratatui::{
     Frame,
@@ -27,13 +27,13 @@ pub fn draw(f: &mut Frame, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),    // header
+            Constraint::Length(3),    // stat band
             Constraint::Min(1),       // body
             Constraint::Length(1),    // status bar
         ])
         .split(area);
 
-    draw_header(f, chunks[0], state);
+    draw_stat_band(f, chunks[0], state);
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -45,17 +45,69 @@ pub fn draw(f: &mut Frame, state: &AppState) {
     draw_help_overlay(f, state);
 }
 
-pub fn draw_header(f: &mut Frame, area: Rect, _state: &AppState) {
-    // Brand mark: ▌Z▐ where Z has orange bg + black bold fg, flanked by
-    // gradient-stop accent half-blocks.
-    let brand = Line::from(vec![
-        Span::styled("▌", Style::default().fg(BRAND_ORANGE_LIGHT)),
-        Span::styled("Z", Style::default().bg(BRAND_ORANGE).fg(Color::Black).add_modifier(Modifier::BOLD)),
-        Span::styled("▐", Style::default().fg(BRAND_ORANGE_LIGHT)),
+pub fn draw_stat_band(f: &mut Frame, area: Rect, state: &AppState) {
+    use ratatui::widgets::{Block, Borders, Paragraph};
+    use ratatui::style::{Style, Color, Modifier};
+    use ratatui::text::{Line, Span};
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" ZESTFUL TOP ",
+            Style::default().fg(BRAND_ORANGE).add_modifier(Modifier::BOLD)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let cost = state.summary.as_ref().map(|s| format!("${:.2} today", s.today_cost_usd))
+                                     .unwrap_or_else(|| "$— today".to_string());
+    let toks = state.summary.as_ref().map(|s| format_tokens(s.today_tokens))
+                                     .unwrap_or_else(|| "— tokens".to_string());
+    let counts = match state.summary.as_ref() {
+        Some(s) => format!("{} agents · {} sessions", s.agents, s.sessions),
+        None    => "— agents · — sessions".to_string(),
+    };
+    let spark = state.summary.as_ref().map(|s| spark7(&s.cost_sparkline))
+                                      .unwrap_or_else(|| "       ".to_string());
+
+    let line = Line::from(vec![
+        Span::styled(" Z ", Style::default()
+            .bg(BRAND_ORANGE)
+            .fg(Color::Black).add_modifier(Modifier::BOLD)),
         Span::raw("  "),
-        Span::styled("zestful top", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(cost),
+        Span::raw("   ·   "),
+        Span::raw(toks),
+        Span::raw("   ·   "),
+        Span::raw(counts),
+        Span::raw("   ·   "),
+        Span::styled(spark, Style::default().fg(Color::Rgb(0x67, 0xE8, 0xF9))),
+        Span::raw("  cost (24h)"),
     ]);
-    f.render_widget(Paragraph::new(brand), area);
+    f.render_widget(Paragraph::new(line), inner);
+}
+
+fn format_tokens(n: u64) -> String {
+    format!("{} tokens", format_tokens_short(n))
+}
+
+/// Number-only formatter, for inline use where "tokens" is implied by
+/// surrounding context (e.g. "in 12.4K · out 832").
+pub(super) fn format_tokens_short(n: u64) -> String {
+    if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1_000_000.0) }
+    else if n >= 1_000 { format!("{:.1}K", n as f64 / 1_000.0) }
+    else { format!("{}", n) }
+}
+
+fn spark7(buckets: &[f64; 7]) -> String {
+    const GLYPHS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let max = buckets.iter().cloned().fold(0.0f64, f64::max);
+    if max <= 0.0 { return GLYPHS[0].to_string().repeat(7); }
+    buckets.iter().map(|&v| {
+        if v <= 0.0 { GLYPHS[0] }
+        else {
+            let idx = ((v / max) * (GLYPHS.len() as f64 - 1.0)).ceil() as usize;
+            GLYPHS[idx.min(GLYPHS.len() - 1)]
+        }
+    }).collect()
 }
 
 pub fn draw_status_bar(f: &mut Frame, area: Rect, state: &AppState) {
@@ -367,8 +419,10 @@ mod tests {
     fn brand_mark_appears_at_origin() {
         let state = AppState::new();
         let buf = render(&state, 80, 5);
-        // Cell 0,0 is "▌"; cell 1,0 is "Z" with orange bg + black fg.
-        let z = buf.cell((1, 0)).unwrap();
+        // Stat band block has a top border at row 0 (left border at col 0) and
+        // inner content begins at (1, 1). The line starts with " Z " (leading
+        // space, then the brand mark), so "Z" lands at col 2, row 1.
+        let z = buf.cell((2, 1)).unwrap();
         assert_eq!(z.symbol(), "Z");
         assert_eq!(z.bg, BRAND_ORANGE);
         assert_eq!(z.fg, Color::Black);
@@ -435,8 +489,10 @@ mod tests {
         state.tiles = vec![fake_tile("claude-code", "zestful", "tmux:z/pane:%0")];
         state.connection = Connection::Live;
         let buf = render(&state, 80, 10);
-        // Body starts at row 1. The first tile row should have ▶ near the start.
-        let row1: String = (0..40).map(|x| buf.cell((x, 2)).unwrap().symbol().to_string()).collect::<Vec<_>>().join("");
+        // Stat band occupies rows 0..3, body starts at row 3 (top border of
+        // tiles block), inner content at row 4. The first tile row should
+        // have ▶ near the start.
+        let row1: String = (0..40).map(|x| buf.cell((x, 4)).unwrap().symbol().to_string()).collect::<Vec<_>>().join("");
         assert!(row1.contains("▶"), "expected ▶ cursor, got: {}", row1);
         assert!(row1.contains("claude-code"));
     }
@@ -515,5 +571,52 @@ mod tests {
             all.push('\n');
         }
         assert!(all.contains("focus failed: x"), "expected toast text in buffer, got:\n{}", all);
+    }
+
+    fn make_state_with_summary() -> AppState {
+        let mut s = AppState::new();
+        s.summary = Some(crate::events::summary::Summary {
+            today_cost_usd: 4.27,
+            today_tokens: 142_300,
+            agents: 3,
+            sessions: 7,
+            cost_sparkline: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+        });
+        s
+    }
+
+    #[test]
+    fn stat_band_renders_dollar_today_and_token_count() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(120, 25);
+        let mut term = Terminal::new(backend).unwrap();
+        let state = make_state_with_summary();
+        term.draw(|f| draw(f, &state)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text = (0..3).map(|y| {
+            (0..120).map(|x| buf.cell((x as u16, y as u16)).map(|c| c.symbol()).unwrap_or(""))
+                    .collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("$4.27"),    "expected $4.27 in stat band, got:\n{}", text);
+        assert!(text.contains("142.3K"),   "expected 142.3K in stat band, got:\n{}", text);
+        assert!(text.contains("3 agents"), "expected agent count, got:\n{}", text);
+        assert!(text.contains("7 sessions"), "expected session count, got:\n{}", text);
+    }
+
+    #[test]
+    fn stat_band_shows_dashes_when_summary_missing() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(120, 25);
+        let mut term = Terminal::new(backend).unwrap();
+        let state = AppState::new(); // summary: None
+        term.draw(|f| draw(f, &state)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text = (0..3).map(|y| {
+            (0..120).map(|x| buf.cell((x as u16, y as u16)).map(|c| c.symbol()).unwrap_or(""))
+                    .collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("—"), "expected '—' placeholder in stat band, got:\n{}", text);
     }
 }

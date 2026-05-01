@@ -11,8 +11,10 @@ use crate::events::notifications::rule::Severity;
 /// brand mark background, focused-pane border, filter mode indicator.
 pub const BRAND_ORANGE: Color = Color::Rgb(0xF5, 0x9E, 0x0A);
 
-/// Lighter system orange (`#FF9500`) used for the gradient-stop accent
-/// half-blocks flanking the brand mark.
+/// Lighter system orange (`#FF9500`) used for gradient-stop accent half-blocks.
+/// Currently retained for future chrome use (e.g. gradient title flourishes);
+/// the test in this module asserts no agent-palette collision against it.
+#[allow(dead_code)]
 pub const BRAND_ORANGE_LIGHT: Color = Color::Rgb(0xFF, 0x95, 0x00);
 
 /// Per-agent palette. 12 distinguishable hues; brand-orange-adjacent
