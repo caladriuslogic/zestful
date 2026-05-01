@@ -132,11 +132,6 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
         None
     });
 
-    let token = crate::config::read_token().ok_or_else(|| {
-        anyhow::anyhow!("Zestful app not running or not configured. Token not found.")
-    })?;
-    let port = crate::config::read_port();
-
     crate::log::log(
         "hook",
         &format!(
@@ -148,16 +143,6 @@ pub fn run(agent_override: Option<String>) -> Result<()> {
             policy.push,
         ),
     );
-
-    crate::cmd::notify::send(
-        &token,
-        port,
-        &agent_name,
-        &policy.message,
-        policy.severity.as_str(),
-        terminal_uri.clone(),
-        !policy.push,
-    )?;
 
     // Also emit structured events to the daemon. Best-effort — errors never
     // propagate. This path runs independently of the legacy /notify path.
