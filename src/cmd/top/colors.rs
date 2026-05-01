@@ -62,6 +62,17 @@ pub fn connection_color(state: ConnectionState) -> Color {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState { Live, Reconnecting, Offline }
 
+/// Color for a context-window utilization ratio. Three bands:
+/// `< 0.70` healthy (green), `< 0.90` warming (amber-400, matches
+/// Severity::Warn), `≥ 0.90` critical (red).
+#[allow(dead_code)]
+pub fn ctx_band_color(pct: f64) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    if pct < 0.70      { Color::Rgb(0x22, 0xC5, 0x5E) }
+    else if pct < 0.90 { Color::Rgb(0xFB, 0xBF, 0x24) }
+    else               { Color::Rgb(0xEF, 0x44, 0x44) }
+}
+
 /// Notification severity color.
 pub fn severity_color(s: &Severity) -> Color {
     match s {
@@ -103,6 +114,17 @@ mod tests {
         for n in ["a", "b", "claude-code", "very-long-agent-name-asdf-asdf"] {
             assert!(agent_color_index(n) < AGENT_PALETTE.len());
         }
+    }
+
+    #[test]
+    fn ctx_band_color_maps_to_severity_palette() {
+        use ratatui::style::Color;
+        assert_eq!(ctx_band_color(0.0),  Color::Rgb(0x22, 0xC5, 0x5E));
+        assert_eq!(ctx_band_color(0.69), Color::Rgb(0x22, 0xC5, 0x5E));
+        assert_eq!(ctx_band_color(0.70), Color::Rgb(0xFB, 0xBF, 0x24));
+        assert_eq!(ctx_band_color(0.89), Color::Rgb(0xFB, 0xBF, 0x24));
+        assert_eq!(ctx_band_color(0.90), Color::Rgb(0xEF, 0x44, 0x44));
+        assert_eq!(ctx_band_color(1.50), Color::Rgb(0xEF, 0x44, 0x44));
     }
 
     #[test]
