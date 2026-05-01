@@ -119,44 +119,44 @@ pub fn enrich_with_metrics(
     use crate::events::payload::TurnTokens;
     use std::collections::HashMap;
 
-    // 1) Build session_id → tile_id map from the most recent
-    // surface-attributed event for each session_id in the window.
-    let mut stmt = conn.prepare(
-        "SELECT session_id, context
-         FROM events
-         WHERE event_ts >= ? AND session_id IS NOT NULL AND context IS NOT NULL
-         ORDER BY event_ts DESC, id DESC"
-    )?;
+    // 1) Build session_id → tile_id map by running each event through
+    // the same `derive::derive` logic compute() uses. This keeps a
+    // single source of truth for what (agent, project_anchor,
+    // surface_token) an event maps to — events emit fields like
+    // `application_instance` / `subapplication`, not a literal
+    // `surface_token`, so reading ctx["surface_token"] would silently
+    // fail to attribute any real-world event to a tile.
+    //
+    // Iterating ASC by received_at means later attributions overwrite
+    // earlier ones, so the most-recent surface event per session_id
+    // wins.
+    let rows = fetch_since(conn, since_ms)?;
+    let mut active_views = derive::VscodeAttribution::new();
+    let mut recent_focus = derive::VscodeRecentFocus::default();
     let mut session_to_tile: HashMap<String, String> = HashMap::new();
-    let rows = stmt.query_map([since_ms], |row| {
-        let s: String = row.get(0)?;
-        let c: String = row.get(1)?;
-        Ok((s, c))
-    })?;
-    for r in rows {
-        let (sid, ctx_str) = r?;
-        if session_to_tile.contains_key(&sid) { continue; }
-        let ctx: serde_json::Value = match serde_json::from_str(&ctx_str) {
-            Ok(v) => v, Err(_) => continue,
-        };
-        let agent = match ctx.get("agent").and_then(|v| v.as_str()) {
-            Some(a) => a, None => continue,
-        };
-        let surface = ctx.get("surface_token").and_then(|v| v.as_str())
-            .unwrap_or("");
-        // The full tile id depends on (agent, project_anchor, surface_token).
-        // Without project_anchor in the surface event we match on (agent,
-        // surface_token) only. If two tiles share that pair the first match
-        // wins (iteration order — non-deterministic). v1 limitation;
-        // tightenable once events carry project_anchor in their context.
-        for t in tiles.iter() {
-            if t.agent == agent && t.surface_token == surface {
-                session_to_tile.insert(sid.clone(), t.id.clone());
-                break;
+    for row in &rows {
+        if let Some((window_pid, view, visible)) = derive::parse_view_visible_change(row) {
+            if visible {
+                active_views.insert(window_pid, view);
+            } else {
+                active_views.remove(&window_pid);
             }
         }
+        if let Some((window_pid, workspace_root, ts_ms)) = derive::parse_vscode_focus_signal(row) {
+            recent_focus = derive::VscodeRecentFocus {
+                ts_ms: Some(ts_ms),
+                window_pid: Some(window_pid),
+                workspace_root: Some(workspace_root),
+            };
+        }
+        // turn.metrics rows carry no surface signal — they're the
+        // payload we're trying to attach; skip them in the join pass.
+        if row.event_type == "turn.metrics" { continue; }
+        let Some(sid) = row.session_id.as_deref() else { continue; };
+        let Some(d) = derive::derive(row, &active_views, &recent_focus) else { continue; };
+        let tid = tile::id_for(&d.agent, &d.project_anchor, &d.surface_token);
+        session_to_tile.insert(sid.to_string(), tid);
     }
-    drop(stmt);
 
     // 2) Aggregate turn.metrics per session.
     struct Agg {
@@ -449,7 +449,11 @@ mod tests {
             rusqlite::params![
                 now - 5000, "h1", now - 5000, "s1",
                 json!({ "session_id": "s1" }).to_string(),
-                json!({ "agent": "claude-code", "surface_token": "tmux:z/pane:%0" }).to_string(),
+                json!({
+                    "agent": "claude-code",
+                    "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" },
+                    "cwd": "/x/zestful"
+                }).to_string(),
                 json!({}).to_string(),
             ],
         ).unwrap();
@@ -526,6 +530,77 @@ mod tests {
     }
 
     #[test]
+    fn enrich_attaches_metrics_for_realistic_cli_event_without_literal_surface_token_field() {
+        // Production events from the CLI hook do NOT carry a literal
+        // `context.surface_token` field — they emit `application` /
+        // `application_instance` / `subapplication`, and the tile
+        // projection derives `surface_token` from those via
+        // `derive::derive`. enrich_with_metrics must use the SAME
+        // derivation so the session→tile join works on real data.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::events::store::schema::run_migrations(&conn).unwrap();
+
+        let now = 1_761_830_000_000i64;
+
+        // Surface-attributed event with the shape real Claude Code hook
+        // events have: application_instance + cwd, no surface_token.
+        conn.execute(
+            "INSERT INTO events (
+                received_at, event_id, schema_version, event_ts, seq,
+                host, os_user, device_id, source, source_pid,
+                event_type, session_id, project, correlation, context, payload
+            ) VALUES (?,?,1,?,0,'h','u','d','hook',1,
+                      'tool.completed',?,'/x/zestful',?,?,?)",
+            rusqlite::params![
+                now - 5000, "h1", now - 5000, "s1",
+                json!({ "session_id": "s1" }).to_string(),
+                json!({
+                    "agent": "claude-code",
+                    "application": "tmux:0",
+                    "application_instance": "window:0",
+                    "cwd": "/x/zestful"
+                }).to_string(),
+                json!({}).to_string(),
+            ],
+        ).unwrap();
+
+        // turn.metrics for the same session — context shape mirrors
+        // what scraper/emit.rs actually emits (no surface info).
+        conn.execute(
+            "INSERT INTO events (
+                received_at, event_id, schema_version, event_ts, seq,
+                host, os_user, device_id, source, source_pid,
+                event_type, session_id, project, correlation, context, payload
+            ) VALUES (?,?,1,?,0,'h','u','d','agent-scraper',1,
+                      'turn.metrics',?,NULL,?,?,?)",
+            rusqlite::params![
+                now - 1000, "m1", now - 1000, "s1",
+                json!({ "session_id": "s1" }).to_string(),
+                json!({ "agent": "claude-code", "model": "claude-opus-4-7" }).to_string(),
+                json!({
+                    "model": "claude-opus-4-7",
+                    "tokens": { "input": 1000, "output": 200, "cache_read": 500,
+                                "cache_write": 0, "reasoning": 0 },
+                    "context": { "used_tokens": 1000, "max_tokens": 200000, "ratio": 0.005 },
+                    "cost_estimate_usd": 0.10,
+                    "message_count": 1
+                }).to_string(),
+            ],
+        ).unwrap();
+
+        // Tile that compute() would produce for this stream:
+        // (agent, project_anchor, surface_token) = ("claude-code", "/x/zestful", "window:0").
+        let mut tiles = vec![synth_tile("claude-code", "window:0")];
+        enrich_with_metrics(&conn, &mut tiles, now - 24 * 3_600_000, now).unwrap();
+
+        let m = tiles[0].metrics.as_ref()
+            .expect("metrics should attach when surface_token derives from application_instance");
+        assert_eq!(m.session_id, "s1");
+        assert_eq!(m.model, "claude-opus-4-7");
+        assert_eq!(m.context_used_tokens, 1000);
+    }
+
+    #[test]
     fn walk_and_derive_two_windows_have_independent_map_state() {
         // W1 has view A visible; W2 has view B visible.
         // window.focused on W1 → vscode+A
@@ -571,7 +646,11 @@ mod tests {
             rusqlite::params![
                 now - 5000, "h1", now - 5000, "s1",
                 json!({ "session_id": "s1" }).to_string(),
-                json!({ "agent": "claude-code", "surface_token": "tmux:z/pane:%0" }).to_string(),
+                json!({
+                    "agent": "claude-code",
+                    "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" },
+                    "cwd": "/x/zestful"
+                }).to_string(),
                 json!({}).to_string(),
             ],
         ).unwrap();
@@ -632,7 +711,11 @@ mod tests {
             rusqlite::params![
                 now - 5000, "h1", now - 5000, "s1",
                 json!({ "session_id": "s1" }).to_string(),
-                json!({ "agent": "claude-code", "surface_token": "tmux:z/pane:%0" }).to_string(),
+                json!({
+                    "agent": "claude-code",
+                    "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" },
+                    "cwd": "/x/zestful"
+                }).to_string(),
                 json!({}).to_string(),
             ],
         ).unwrap();
@@ -708,7 +791,11 @@ mod tests {
                 rusqlite::params![
                     ts, id, ts, sid,
                     json!({ "session_id": sid }).to_string(),
-                    json!({ "agent": "claude-code", "surface_token": "tmux:z/pane:%0" }).to_string(),
+                    json!({
+                    "agent": "claude-code",
+                    "subapplication": { "kind": "tmux", "session": "z", "pane": "%0" },
+                    "cwd": "/x/zestful"
+                }).to_string(),
                     json!({}).to_string(),
                 ],
             ).unwrap();
