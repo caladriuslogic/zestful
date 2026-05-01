@@ -31,6 +31,12 @@ pub struct EventsResponse {
     pub events: Vec<EventRow>,
 }
 
+#[allow(dead_code)] // wired into TUI event loop in Task 10
+#[derive(Debug, Deserialize)]
+pub struct SummaryResponse {
+    pub summary: crate::events::summary::Summary,
+}
+
 #[derive(Clone)]
 pub struct Client {
     base_url: String,   // e.g. "http://127.0.0.1:21548"
@@ -81,6 +87,18 @@ impl Client {
         check_status(&resp).await?;
         let body: NotificationsResponse = resp.json().await.context("parsing /notifications JSON")?;
         Ok(body.notifications)
+    }
+
+    #[allow(dead_code)] // wired into TUI event loop in Task 10
+    pub async fn summary(&self) -> Result<crate::events::summary::Summary> {
+        let resp = self.http
+            .get(format!("{}/summary", self.base_url))
+            .header("X-Zestful-Token", &self.token)
+            .send().await
+            .context("GET /summary")?;
+        check_status(&resp).await?;
+        let body: SummaryResponse = resp.json().await.context("parsing /summary JSON")?;
+        Ok(body.summary)
     }
 
     pub async fn events_for_agent(&self, agent: &str, surface_token: Option<&str>, since_ms: i64, limit: usize) -> Result<Vec<EventRow>> {
@@ -322,5 +340,41 @@ mod tests {
         }
 
         std::env::remove_var("ZESTFUL_TOKEN_OVERRIDE");
+    }
+
+    #[tokio::test]
+    async fn summary_parses_realistic_response() {
+        let router = Router::new().route("/summary", axum::routing::get(|| async {
+            axum::Json(serde_json::json!({
+                "summary": {
+                    "today_cost_usd": 4.27,
+                    "today_tokens": 142_300,
+                    "agents": 3,
+                    "sessions": 7,
+                    "cost_sparkline": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+                },
+                "computed_at": 1234567890i64,
+            }))
+        }));
+        let url = spawn_test_daemon(router).await;
+        let c = Client::new(&url, "ignored").unwrap();
+        let s = c.summary().await.unwrap();
+        assert!((s.today_cost_usd - 4.27).abs() < 1e-9);
+        assert_eq!(s.today_tokens, 142_300);
+        assert_eq!(s.agents, 3);
+        assert_eq!(s.sessions, 7);
+        assert_eq!(s.cost_sparkline.len(), 7);
+    }
+
+    #[tokio::test]
+    async fn summary_403_returns_err() {
+        let router = Router::new().route("/summary", axum::routing::get(|| async {
+            (axum::http::StatusCode::FORBIDDEN,
+             axum::Json(serde_json::json!({"error":"invalid token"})))
+        }));
+        let url = spawn_test_daemon(router).await;
+        let c = Client::new(&url, "wrong").unwrap();
+        let err = c.summary().await.unwrap_err();
+        assert!(format!("{}", err).contains("403"));
     }
 }
