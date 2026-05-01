@@ -301,6 +301,7 @@ mod tests {
             event_count: events,
             latest_event_type: "turn.completed".to_string(),
             focus_uri: focus.map(String::from),
+            metrics: None,
         }
     }
 

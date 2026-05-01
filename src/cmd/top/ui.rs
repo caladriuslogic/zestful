@@ -424,6 +424,7 @@ mod tests {
             event_count: 5,
             latest_event_type: "turn.completed".to_string(),
             focus_uri: Some("workspace://x".to_string()),
+            metrics: None,
         }
     }
 
