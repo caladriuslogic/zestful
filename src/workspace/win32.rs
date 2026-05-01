@@ -479,6 +479,45 @@ fn collect_windows_for_pids(pids: &HashSet<u32>) -> Vec<(u32, String)> {
     state.seen.into_iter().collect()
 }
 
+/// Find the visible CASCADIA_HOSTING_WINDOW_CLASS frame window owned by `wt_pid`.
+pub fn find_cascadia_frame_for_pid(wt_pid: u32) -> HWND {
+    struct State { wt_pid: u32, result: HWND }
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let state = &mut *(lparam as *mut State);
+        if IsWindowVisible(hwnd) == FALSE { return TRUE; }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid != state.wt_pid { return TRUE; }
+        let mut cls = [0u16; 64];
+        GetClassNameW(hwnd, cls.as_mut_ptr(), cls.len() as i32);
+        if wcs_to_string(&cls) != "CASCADIA_HOSTING_WINDOW_CLASS" { return TRUE; }
+        state.result = hwnd;
+        FALSE
+    }
+    let mut state = State { wt_pid, result: 0 };
+    unsafe { EnumWindows(Some(cb), &mut state as *mut _ as LPARAM); }
+    state.result
+}
+
+/// Return the shell PID for each PseudoConsoleWindow whose Win32 parent is `frame_hwnd`.
+pub fn find_pseudo_console_shell_pids(frame_hwnd: HWND) -> Vec<u32> {
+    struct State { frame_hwnd: HWND, results: Vec<u32> }
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let state = &mut *(lparam as *mut State);
+        if GetParent(hwnd) != state.frame_hwnd { return TRUE; }
+        let mut cls = [0u16; 64];
+        GetClassNameW(hwnd, cls.as_mut_ptr(), cls.len() as i32);
+        if wcs_to_string(&cls) != "PseudoConsoleWindow" { return TRUE; }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        (*state).results.push(pid);
+        TRUE
+    }
+    let mut state = State { frame_hwnd, results: Vec::new() };
+    unsafe { EnumWindows(Some(cb), &mut state as *mut _ as LPARAM); }
+    state.results
+}
+
 fn wcs_to_string(wcs: &[u16]) -> String {
     let end = wcs.iter().position(|&c| c == 0).unwrap_or(wcs.len());
     String::from_utf16_lossy(&wcs[..end])

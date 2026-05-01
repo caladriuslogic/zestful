@@ -31,6 +31,7 @@ pub struct EventsResponse {
     pub events: Vec<EventRow>,
 }
 
+#[derive(Clone)]
 pub struct Client {
     base_url: String,   // e.g. "http://127.0.0.1:21548"
     token: String,

@@ -18,6 +18,10 @@ use app::{AppState, Connection, SideEffect};
 use client::{Client, StreamEvent};
 use keys::key_to_action;
 
+use crate::events::tiles::tile::Tile;
+use crate::events::notifications::notification::Notification;
+use crate::events::store::query::EventRow;
+
 pub fn run(modal: bool) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(run_async(modal))
@@ -63,14 +67,31 @@ async fn main_loop(term: &mut Terminal<CrosstermBackend<io::Stdout>>, modal: boo
     let mut keys = EventStream::new();
     let mut tick = interval(Duration::from_secs(1));
 
-    // Debounce timer for SSE-driven refetches.
+    // Debounce timer for SSE-driven refetches. 1 s avoids hammering tiles::compute
+    // (a full 24 h event rescan) on every hook event during active Claude sessions.
     let mut dirty_at: Option<Instant> = None;
-    const DEBOUNCE: Duration = Duration::from_millis(100);
+    const DEBOUNCE: Duration = Duration::from_millis(1000);
 
-    term.draw(|f| ui::draw(f, &state))?;
+    // Channel for background refetch results. The spawned task sends (tiles,
+    // notifications, events); the result arm in select! applies them to state.
+    type FetchResult = (Vec<Tile>, Vec<Notification>, Vec<EventRow>);
+    let (fetch_tx, mut fetch_rx) = tokio::sync::mpsc::channel::<FetchResult>(1);
+    let mut fetch_pending = false;
+
+    // Guard against unnecessary redraws. VS Code's terminal (xterm.js) sends
+    // focus and cursor-position-report events that wake the select loop without
+    // changing any state; redrawing on every wakeup creates a feedback loop that
+    // pins CPU. We only redraw when an arm actually mutates state or the terminal
+    // is resized.
+    let mut needs_redraw = true; // always draw the first frame
 
     loop {
         if state.should_quit { break; }
+
+        if needs_redraw {
+            term.draw(|f| ui::draw(f, &state))?;
+            needs_redraw = false;
+        }
 
         // Compute the soonest debounce deadline.
         let debounce_sleep = dirty_at.map(|t| {
@@ -82,13 +103,17 @@ async fn main_loop(term: &mut Terminal<CrosstermBackend<io::Stdout>>, modal: boo
             biased;
 
             Some(Ok(ev)) = keys.next() => {
-                if let CtEvent::Key(k) = ev {
-                    if k.kind == KeyEventKind::Press {
+                match ev {
+                    CtEvent::Key(k) if k.kind == KeyEventKind::Press => {
                         if let Some(action) = key_to_action(k, state.input_mode) {
                             let fx = state.apply(action);
                             if let Some(c) = client.as_ref() { run_side_effects(c, &mut state, fx).await; }
+                            needs_redraw = true;
                         }
                     }
+                    // Redraw to fill new dimensions; ignore focus/mouse/CPR events.
+                    CtEvent::Resize(_, _) => { needs_redraw = true; }
+                    _ => {}
                 }
             }
 
@@ -99,33 +124,55 @@ async fn main_loop(term: &mut Terminal<CrosstermBackend<io::Stdout>>, modal: boo
                 match maybe {
                     Some(StreamEvent::Connected) => {
                         state.connection = Connection::Live;
+                        needs_redraw = true;
                     }
                     Some(StreamEvent::ProjectionChanged(_frame)) => {
                         if state.connection != Connection::Live {
                             state.connection = Connection::Live;
                         }
                         dirty_at = Some(Instant::now());
+                        needs_redraw = true;
                     }
                     Some(StreamEvent::Disconnected(reason)) => {
                         state.connection = Connection::Reconnecting;
                         let _ = reason; // reqwest-eventsource will reconnect itself.
+                        needs_redraw = true;
                     }
                     None => {
                         sse_stream = None;
                         state.connection = Connection::Offline("stream ended".to_string());
+                        needs_redraw = true;
                     }
                 }
             }
 
-            // Debounce-driven refetch.
+            // Debounce-driven refetch — spawned as a background task so keyboard
+            // input is never blocked while HTTP round-trips are in flight.
             _ = async {
                 if let Some(d) = debounce_sleep { tokio::time::sleep(d).await; }
                 else { futures::future::pending::<()>().await; }
-            }, if dirty_at.is_some() => {
+            }, if dirty_at.is_some() && !fetch_pending => {
                 dirty_at = None;
                 if let Some(c) = client.as_ref() {
-                    refetch_after_signal(c, &mut state).await;
+                    let c2 = c.clone();
+                    let tx = fetch_tx.clone();
+                    let agent = state.selected_tile().map(|t| t.agent.clone());
+                    let surface = state.selected_tile().and_then(|t| tile_surface_token(t));
+                    fetch_pending = true;
+                    tokio::spawn(async move {
+                        let result = fetch_projection(&c2, agent, surface).await;
+                        let _ = tx.send(result).await;
+                    });
                 }
+            }
+
+            // Background refetch completed — apply results to state.
+            Some((tiles, notifs, events)) = fetch_rx.recv() => {
+                fetch_pending = false;
+                state.tiles = tiles;
+                state.notifications = notifs;
+                state.recent_events = events;
+                needs_redraw = true;
             }
 
             _ = tick.tick() => {
@@ -133,18 +180,17 @@ async fn main_loop(term: &mut Terminal<CrosstermBackend<io::Stdout>>, modal: boo
                 if let Some((_, when)) = &state.toast {
                     if when.elapsed() > Duration::from_secs(3) {
                         state.toast = None;
+                        needs_redraw = true;
                     }
                 }
             }
         }
-
-        term.draw(|f| ui::draw(f, &state))?;
     }
     Ok(())
 }
 
 async fn kickoff_initial_fetch(c: &Client, state: &mut AppState) {
-    let since = since_24h();
+    let since = since_1h();
     match c.tiles(since).await {
         Ok(t) => state.tiles = t,
         Err(e) => state.connection = Connection::Offline(format!("{}", e)),
@@ -154,42 +200,46 @@ async fn kickoff_initial_fetch(c: &Client, state: &mut AppState) {
     }
 }
 
-async fn refetch_after_signal(c: &Client, state: &mut AppState) {
-    let since = since_24h();
+/// Fetch tiles, notifications, and optionally events for the selected agent.
+/// Pure I/O — returns data without mutating AppState, so it can run in a
+/// spawned task without holding any state borrows.
+async fn fetch_projection(
+    c: &Client,
+    agent: Option<String>,
+    surface: Option<String>,
+) -> (Vec<Tile>, Vec<Notification>, Vec<EventRow>) {
+    let since = since_1h();
     let (t, n) = tokio::join!(c.tiles(since), c.notifications(since));
-    if let Ok(t) = t { state.tiles = t; }
-    if let Ok(n) = n { state.notifications = n; }
-    if let Some(sel) = state.selected_tile() {
-        let agent = sel.agent.clone();
-        let surface = tile_surface_token(sel);
-        if let Ok(evs) = c.events_for_agent(&agent, surface.as_deref(), since_24h(), 60).await {
-            state.recent_events = evs;
-        }
-    }
+    let tiles = t.unwrap_or_default();
+    let notifs = n.unwrap_or_default();
+    let events = match agent {
+        Some(a) => c.events_for_agent(&a, surface.as_deref(), since_1h(), 60).await.unwrap_or_default(),
+        None => vec![],
+    };
+    (tiles, notifs, events)
 }
 
 async fn run_side_effects(c: &Client, state: &mut AppState, fx: Vec<SideEffect>) {
     for f in fx {
         match f {
             SideEffect::RefetchTiles => {
-                if let Ok(t) = c.tiles(since_24h()).await { state.tiles = t; }
+                if let Ok(t) = c.tiles(since_1h()).await { state.tiles = t; }
             }
             SideEffect::RefetchNotifications => {
-                if let Ok(n) = c.notifications(since_24h()).await { state.notifications = n; }
+                if let Ok(n) = c.notifications(since_1h()).await { state.notifications = n; }
             }
             SideEffect::RefetchEventsForSelected => {
                 if let Some(sel) = state.selected_tile() {
                     let agent = sel.agent.clone();
                     let surface = tile_surface_token(sel);
-                    if let Ok(evs) = c.events_for_agent(&agent, surface.as_deref(), since_24h(), 60).await {
+                    if let Ok(evs) = c.events_for_agent(&agent, surface.as_deref(), since_1h(), 60).await {
                         state.recent_events = evs;
                     }
                 }
             }
             SideEffect::PostFocus { terminal_uri, .. } => {
-                if let Err(e) = c.post_focus(&terminal_uri).await {
-                    state.toast = Some((format!("focus failed: {}", e), Instant::now()));
-                }
+                let c2 = c.clone();
+                tokio::spawn(async move { let _ = c2.post_focus(&terminal_uri).await; });
             }
         }
     }
@@ -202,7 +252,6 @@ fn tile_surface_token(tile: &crate::events::tiles::tile::Tile) -> Option<String>
     if tile.surface_kind == "browser" { None } else { Some(tile.surface_token.clone()) }
 }
 
-fn since_24h() -> i64 { now_ms() - 24 * 3_600_000 }
 fn since_1h() -> i64 { now_ms() - 3_600_000 }
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
