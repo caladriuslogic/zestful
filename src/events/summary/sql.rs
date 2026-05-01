@@ -13,10 +13,21 @@ use chrono::{Local, TimeZone};
 pub fn today_window_ms(now_ms: i64) -> i64 {
     let now = Local.timestamp_millis_opt(now_ms).single()
         .expect("valid unix-ms");
-    let midnight = now.date_naive().and_hms_opt(0, 0, 0)
-        .expect("00:00:00 always valid")
-        .and_local_timezone(Local).single()
-        .expect("midnight unambiguous");
+    let naive_midnight = now.date_naive().and_hms_opt(0, 0, 0)
+        .expect("00:00:00 always valid");
+    // Local midnight may be `None` (DST spring-forward at midnight) or
+    // `Ambiguous` (fall-back through midnight). In either rare case we
+    // pick the earliest valid local instant rather than panic.
+    use chrono::offset::LocalResult;
+    let midnight = match naive_midnight.and_local_timezone(Local) {
+        LocalResult::Single(dt)        => dt,
+        LocalResult::Ambiguous(a, _)   => a,
+        LocalResult::None              => Local
+            .from_local_datetime(&naive_midnight)
+            .earliest()
+            .unwrap_or_else(|| Local.timestamp_millis_opt(now_ms).single()
+                .expect("valid unix-ms")),
+    };
     midnight.timestamp_millis()
 }
 
@@ -26,6 +37,11 @@ pub fn today_window_ms(now_ms: i64) -> i64 {
 ///
 /// Bucket 0 = oldest (24h ago); bucket 6 = newest (containing `now_ms`).
 /// Bucket size = 24h / 7 ≈ 3 h 25 m.
+///
+/// Boundary: `ts == now - span` returns `None`; `ts == now` lands in
+/// bucket 6. The `(now-span, now]` half-open window is intentional —
+/// callers passing `event_ts >= now - 24h` from SQL get well-defined
+/// bucket assignments without any cell straddling the cutoff.
 pub fn bucket_idx(ts_ms: i64, now_ms: i64) -> Option<usize> {
     let span = 24 * 3_600_000i64;
     if ts_ms > now_ms || ts_ms <= now_ms - span { return None; }
