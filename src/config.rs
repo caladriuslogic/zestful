@@ -47,6 +47,38 @@ pub fn daemon_port() -> u16 {
     DAEMON_PORT
 }
 
+/// Ensure a `local-token` exists at `token_file()`. If absent or empty,
+/// generate a 32-byte cryptographically-random token (hex-encoded), write
+/// it with mode 0600, and return its path. No-op when a non-empty token
+/// already exists — the macOS app, an admin, or a prior daemon run may
+/// have written one.
+///
+/// Called from the daemon's `run_server` startup so Linux users get a
+/// working token without manual `openssl rand` setup.
+pub fn ensure_token() -> std::io::Result<PathBuf> {
+    let path = token_file();
+    if let Ok(s) = fs::read_to_string(&path) {
+        if !s.trim().is_empty() {
+            return Ok(path);
+        }
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other,
+                                         format!("getrandom: {}", e)))?;
+    let token: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    fs::write(&path, &token)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(path)
+}
+
 /// Read the auth token from config file, falling back to macOS UserDefaults.
 pub fn read_token() -> Option<String> {
     if let Ok(v) = std::env::var("ZESTFUL_TOKEN_OVERRIDE") {
@@ -280,6 +312,47 @@ mod tests {
     #[test]
     fn test_read_token_returns_some_or_none() {
         let _ = read_token();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ensure_token_creates_a_token_when_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let td = tempfile::TempDir::new().unwrap();
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: tests run --test-threads=1 (HomeGuard convention).
+        unsafe { std::env::set_var("HOME", td.path()); }
+        std::env::remove_var("ZESTFUL_TOKEN_OVERRIDE");
+
+        let path = ensure_token().expect("create token");
+        let s = std::fs::read_to_string(&path).expect("read token");
+        assert_eq!(s.len(), 64, "expected 64 hex chars (32 bytes), got {}", s.len());
+        assert!(s.chars().all(|c| c.is_ascii_hexdigit()),
+                "expected hex chars only: {:?}", s);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected mode 0600, got {:o}", mode);
+
+        if let Some(p) = prev { unsafe { std::env::set_var("HOME", p); } }
+        else { unsafe { std::env::remove_var("HOME"); } }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ensure_token_does_not_overwrite_existing() {
+        let td = tempfile::TempDir::new().unwrap();
+        let prev = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", td.path()); }
+        std::env::remove_var("ZESTFUL_TOKEN_OVERRIDE");
+
+        let dir = config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("local-token"), "preexisting-secret").unwrap();
+        let path = ensure_token().expect("ok");
+        let s = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(s, "preexisting-secret", "must not overwrite existing token");
+
+        if let Some(p) = prev { unsafe { std::env::set_var("HOME", p); } }
+        else { unsafe { std::env::remove_var("HOME"); } }
     }
 
     #[test]

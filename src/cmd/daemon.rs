@@ -79,6 +79,13 @@ async fn run_server() -> Result<()> {
     }
     fs::write(&pid_file, std::process::id().to_string())?;
 
+    // Ensure a local-token exists before clients (the TUI, the Mac app)
+    // try to authenticate. The Mac app writes one on its first launch;
+    // on Linux nothing else does, so the daemon takes responsibility.
+    if let Err(e) = config::ensure_token() {
+        crate::log::log("daemon", &format!("WARN: ensure_token failed: {}", e));
+    }
+
     // Initialize the local event store. Migration failure is fatal —
     // a half-migrated DB is worse than a dead daemon.
     let db_path = config::config_dir().join("events.db");
