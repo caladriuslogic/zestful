@@ -278,8 +278,52 @@ pub fn draw_tiles_list(f: &mut Frame, area: Rect, state: &AppState) {
             Span::styled(format!("{:>4}", last), Style::default().fg(Color::DarkGray)),
             glyph,
         ]));
+        lines.push(tile_metrics_line(t));
     }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Render line 2 of a tile row — the metrics line. Empty Line if
+/// `tile.metrics` is None (whitespace).
+pub fn tile_metrics_line(tile: &crate::events::tiles::tile::Tile) -> ratatui::text::Line<'static> {
+    use ratatui::style::{Style, Color};
+    use ratatui::text::{Line, Span};
+    let Some(m) = tile.metrics.as_ref() else { return Line::raw(""); };
+
+    let bar = ctx_bar(m.context_pct.unwrap_or(0.0));
+    let pct_label = match m.context_pct {
+        Some(p) => format!("{:>3}%", (p * 100.0).round() as i64),
+        None    => "  —".to_string(),
+    };
+    let pct_color = match m.context_pct {
+        Some(p) => crate::cmd::top::colors::ctx_band_color(p),
+        None    => Color::DarkGray,
+    };
+    let cost = match m.session_cost_usd {
+        Some(c) => format!("${:.2}", c),
+        None    => "$—".to_string(),
+    };
+    let cache = match m.cache_hit_pct {
+        Some(p) => format!("c {:>2}%", (p * 100.0).round() as i64),
+        None    => "c —".to_string(),
+    };
+    Line::from(vec![
+        Span::raw("    "),  // indent past cursor (2) + small breathing
+        Span::styled(format!("{} ", bar), Style::default().fg(pct_color)),
+        Span::styled(pct_label, Style::default().fg(pct_color)),
+        Span::raw("  "),
+        Span::raw(cost),
+        Span::raw("  "),
+        Span::raw(cache),
+    ])
+}
+
+/// 10-cell context bar from a 0..1 ratio. Clamps over 1.0 to fully filled.
+fn ctx_bar(pct: f64) -> String {
+    let cells = 10usize;
+    let filled = (pct * cells as f64).round() as usize;
+    let filled = filled.min(cells);
+    "▰".repeat(filled) + &"▱".repeat(cells - filled)
 }
 
 pub fn draw_detail_pane(f: &mut Frame, area: Rect, state: &AppState) {
@@ -618,5 +662,74 @@ mod tests {
                     .collect::<String>()
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("—"), "expected '—' placeholder in stat band, got:\n{}", text);
+    }
+
+    fn make_tile_with_metrics(pct: f64, cost: f64, cache: f64) -> crate::events::tiles::tile::Tile {
+        use crate::events::tiles::tile::{Tile, TileMetrics};
+        use crate::events::payload::TurnTokens;
+        Tile {
+            id: "tile_x".into(), agent: "claude-code".into(),
+            project_anchor: Some("/x/zestful".into()),
+            project_label: Some("zestful".into()),
+            surface_kind: "cli".into(),
+            surface_token: "tmux:z/pane:%0".into(),
+            surface_label: "tmux[z:0]".into(),
+            first_seen_at: 0, last_seen_at: 0,
+            event_count: 42, latest_event_type: "turn.completed".into(),
+            focus_uri: None,
+            metrics: Some(TileMetrics {
+                model: "claude-opus-4-7".into(),
+                session_id: "s1".into(),
+                context_pct: Some(pct),
+                context_used_tokens: 730_000,
+                context_max_tokens: Some(1_000_000),
+                session_cost_usd: Some(cost),
+                cache_hit_pct: Some(cache),
+                burn_rate_usd_hr: Some(1.15),
+                tokens: TurnTokens {
+                    input: 12450, output: 832, cache_read: 8120,
+                    cache_write: 0, reasoning: 0,
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn tile_row_shows_ctx_pct_and_session_cost() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(120, 25);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut state = make_state_with_summary();
+        state.tiles = vec![make_tile_with_metrics(0.73, 0.42, 0.71)];
+        term.draw(|f| draw(f, &state)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text = (0..25).map(|y| {
+            (0..120).map(|x| buf.cell((x as u16, y as u16)).map(|c| c.symbol()).unwrap_or(""))
+                    .collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("73%"), "expected '73%' in tile area:\n{}", text);
+        assert!(text.contains("$0.42"), "expected '$0.42':\n{}", text);
+        assert!(text.contains("c 71%"), "expected 'c 71%':\n{}", text);
+    }
+
+    #[test]
+    fn tile_row_omits_metrics_line_when_metrics_none() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(120, 25);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut state = make_state_with_summary();
+        let mut t = make_tile_with_metrics(0.5, 0.0, 0.0);
+        t.metrics = None;
+        state.tiles = vec![t];
+        term.draw(|f| draw(f, &state)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text = (0..25).map(|y| {
+            (0..120).map(|x| buf.cell((x as u16, y as u16)).map(|c| c.symbol()).unwrap_or(""))
+                    .collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        // No "%" or "$" associated with the metrics row.
+        assert!(!text.contains("ctx"));
     }
 }
