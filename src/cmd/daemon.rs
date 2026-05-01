@@ -528,9 +528,11 @@ async fn handle_tiles(
     let since_ms = q.since.unwrap_or(now_ms - 24 * 3_600_000);
     let agent_filter = q.agent;
 
-    let result = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<crate::events::tiles::tile::Tile>> {
         let c = crate::events::store::conn().lock().unwrap();
-        crate::events::tiles::compute(&c, since_ms)
+        let mut tiles = crate::events::tiles::compute(&c, since_ms)?;
+        crate::events::tiles::enrich_with_metrics(&c, &mut tiles, since_ms, now_ms)?;
+        Ok(tiles)
     })
     .await
     .expect("tiles compute task panicked");
