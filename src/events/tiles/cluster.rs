@@ -22,7 +22,19 @@ pub fn group(rows: &[DerivedRow]) -> Vec<tile::Tile> {
             // unwrap()s below are safe: bucket is non-empty by construction
             // (HashMap entry was created on first push() of this row).
             let first_seen_at = bucket.iter().map(|r| r.received_at).min().unwrap();
-            let last_seen_at = bucket.iter().map(|r| r.received_at).max().unwrap();
+            // last_seen_at represents agent activity, not user activity.
+            // `focus.acknowledged` events are user clicks (the Mac app emits
+            // them when the user clicks the overlay or Focus button) and
+            // shouldn't bump the tile's freshness timer used for the
+            // Working/Ready/Idle UI state machine. Fall back to the unfiltered
+            // max only if the bucket contains nothing else (a rare edge case
+            // where the only contributing event is a focus.acknowledged).
+            let last_seen_at = bucket
+                .iter()
+                .filter(|r| r.event_type != "focus.acknowledged")
+                .map(|r| r.received_at)
+                .max()
+                .unwrap_or_else(|| bucket.iter().map(|r| r.received_at).max().unwrap());
             let event_count = bucket.len() as i64;
             let latest = bucket.iter().max_by_key(|r| r.received_at).unwrap();
             let latest_event_type = latest.event_type.clone();
@@ -172,6 +184,43 @@ mod tests {
         assert_eq!(tiles[0].last_seen_at, 3000);
         assert_eq!(tiles[1].last_seen_at, 2000);
         assert_eq!(tiles[2].last_seen_at, 1000);
+    }
+
+    #[test]
+    fn group_excludes_focus_acknowledged_from_last_seen_at() {
+        // A focus.acknowledged event represents a user click, not agent
+        // activity. It must remain the latest_event_type so the projection
+        // rule engine can dismiss the open notification, but it must NOT
+        // bump last_seen_at — the tile's freshness timer drives the
+        // Working/Ready/Idle UI states and shouldn't reset on user clicks.
+        let rows = vec![
+            dr("claude-code", "/x", "tmux:z/pane:%0", "cli", 1000, "turn.completed"),
+            dr("claude-code", "/x", "tmux:z/pane:%0", "cli", 2000, "agent.notified"),
+            dr("claude-code", "/x", "tmux:z/pane:%0", "cli", 3000, "focus.acknowledged"),
+        ];
+        let tiles = group(&rows);
+        assert_eq!(tiles.len(), 1);
+        // last_seen_at reflects the newest non-focus.acknowledged event.
+        assert_eq!(tiles[0].last_seen_at, 2000);
+        // latest_event_type is still focus.acknowledged so the projection
+        // rule engine sees the dismissal.
+        assert_eq!(tiles[0].latest_event_type, "focus.acknowledged");
+        // event_count includes all events.
+        assert_eq!(tiles[0].event_count, 3);
+    }
+
+    #[test]
+    fn group_falls_back_to_focus_acknowledged_only_bucket() {
+        // Edge case: if the only contributing event is focus.acknowledged
+        // (shouldn't happen in practice — there must be a trigger event for
+        // a user to click — but is a logical fallback), don't panic.
+        let rows = vec![
+            dr("a", "/x", "s", "cli", 1000, "focus.acknowledged"),
+        ];
+        let tiles = group(&rows);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].last_seen_at, 1000);
+        assert_eq!(tiles[0].latest_event_type, "focus.acknowledged");
     }
 
     #[test]
